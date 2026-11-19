@@ -2,6 +2,8 @@
 
     history     queries run on this connection (the history tab), newest last
     last.json   the last run: its text, shell output, result rows and autotrace
+    schema.json the schema tab where it was left (kinds, objects, an object's details and DDL)
+                and the catalog Ctrl-O collected, so both outlive the terminal
     snapshot.json  F1's snapshot of the whole session (shell cells, prompt and cursor, the
                 result's fetched rows and place), brought back once by the next start
 
@@ -163,3 +165,16 @@ def take_snapshot(folder: Path) -> dict | None:
     data["cells"] = [dict(c, rows=_decode_rows(c.get("rows"))) if "rows" in c else c
                      for c in data.get("cells") or []]
     return data
+
+
+def save_schema(folder: Path, data: dict) -> None:
+    """The schema tab's place and the collected catalog (the caller makes it JSON-ready)."""
+    _write_json(folder / "schema.json", dict(data, saved_at=dt.datetime.now().isoformat(timespec="seconds")))
+
+
+def load_schema(folder: Path) -> dict | None:
+    try:
+        data = json.loads((folder / "schema.json").read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None

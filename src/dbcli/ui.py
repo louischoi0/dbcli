@@ -17,16 +17,14 @@ import base64
 import datetime as dt
 import os
 import re
-import shlex
 import subprocess
 import sys
-import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from prompt_toolkit.application import Application, get_app, run_in_terminal
+from prompt_toolkit.application import Application, get_app
 from prompt_toolkit.output.color_depth import ColorDepth
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import Completer, Completion
@@ -42,6 +40,7 @@ from prompt_toolkit.key_binding.vi_state import InputMode
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.key_binding.key_processor import KeyPress
 from prompt_toolkit.layout import (
     BufferControl, ConditionalContainer, DynamicContainer, Float, FloatContainer,
     FormattedTextControl, HSplit, Layout, ScrollablePane, VSplit, Window,
@@ -57,7 +56,8 @@ from prompt_toolkit.utils import get_cwidth
 
 from .abbrev import Abbreviations
 from .config import DATA_DIR, PANEL_TABS, Profile, UISettings
-from .store import (history_stamp, history_view, load_history, load_last, save_last, save_snapshot,
+from .store import (history_stamp, history_view, load_history, load_last, load_schema, save_last, save_schema,
+                    save_snapshot,
                     session_dir, take_snapshot)
 from .db import (MAX_ROWS, PAGE_ROWS, changes_schema, error_text, format_table, is_connection_error, is_parse_error,
                  open_db, prepare_statement)
@@ -120,6 +120,7 @@ MODIFY_OTHER_KEYS_ON, MODIFY_OTHER_KEYS_OFF = "\x1b[>4;1m", "\x1b[>4;0m"
 
 # One palette for everything: soft grays, sky blue for focus/accents, muted red for trouble.
 SKY, SKY_DEEP = "#8cc8ec", "#5f87af"
+ORANGE = "#ff8700"  # conn0's prompt, a switch that is off, the ids in the panel
 TEXT, LIGHT, DIM, FAINT = "#bcbcbc", "#dadada", "#7a7a7a", "#4a4a4a"
 SELECT_BG, MENU_BG, ERROR = "#2d3d48", "#262a2d", "#d78787"
 CELL_BG, STALE = "#1f2a31", "#d7af87"
@@ -130,7 +131,7 @@ STYLE = Style.from_dict({
     # hints can be whiter than it
     "input": "#d0d0d0",
     "keyword": f"{SKY} bold",  # select, from, where …
-    "relation": "#ffffff bold",  # the tables and views a statement uses
+    "relation": "#ffd7af bold",  # the tables and views a statement uses: peach
     "hint": "#ececec bold",  # optimizer hints in /*+ ... */: a touch softer than pure white
     "hint.frame": "#fadde9 bold",  # the /*+ and */ around them: as other symbols
     "symbol": "#fadde9 bold",  # , ( ) + - * / | = < > … : a pale pink, bold
@@ -141,8 +142,8 @@ STYLE = Style.from_dict({
     "prompt.dim": FAINT,
     "prompt.stale": f"{STALE} bold",
     "prompt.running": "#ffd75f bold",
-    # each connection's label on a cell, its own color: conn0 sky, conn1 green, conn2 sand, conn3 rose
-    "prompt.conn0": "#87afd7", "prompt.conn1": "#87d7af", "prompt.conn2": "#d7af87", "prompt.conn3": "#d787af",
+    # each connection's label on a cell, its own color: conn0 orange, conn1 green, conn2 sand, conn3 rose
+    "prompt.conn0": ORANGE, "prompt.conn1": "#87d7af", "prompt.conn2": "#d7af87", "prompt.conn3": "#d787af",
     "cell.focused": f"bg:{CELL_BG}",  # an earlier cell being edited / re-run
     "note": DIM,
     "note.cancel": "#ff6b6b bold",  # ✗: a run cancelled with Ctrl-C
@@ -160,7 +161,12 @@ STYLE = Style.from_dict({
     # lists in the panel
     "list.active": SKY,
     "list.cursor": f"bg:{SELECT_BG} {LIGHT}",
+    "palette": "bg:#262626",  # Ctrl-P's command list
+    "palette.group": f"bg:#262626 {DIM}",
+    "palette.key": f"bg:#262626 {ORANGE}",
+    "palette.match": f"bg:#262626 {SKY} bold",
     "list.note": DIM,
+    "list.id": ORANGE,  # a row's number in the panel: History's run numbers, Template's ids
     "list.empty": f"{DIM} italic",
     # schema browser
     "schema.kind": f"{LIGHT} bold",
@@ -178,6 +184,7 @@ STYLE = Style.from_dict({
     "top.dim": DIM,
     "top.error": ERROR,
     "top.mode": f"{SKY} bold",
+    "top.off": f"{ORANGE} bold",  # the `off` of autocommit / autotrace
     # result table
     "grid.border": FAINT,
     "grid.header": f"{SKY} bold",
@@ -649,6 +656,118 @@ class TabbedPanel:
         self.tab.on_pick(i)
 
 
+@dataclass(frozen=True)
+class Command:
+    """A palette entry: what it does, and the keys that do it (fed in when picked)."""
+    group: str
+    label: str
+    shortcut: str  # as shown
+    keys: tuple  # the key presses to replay
+    where: str = "any"  # any | cell | cell-normal | results | tab:<name>
+
+
+def palette_match(query: str, c: Command) -> int | None:
+    """A rank for `c` (lower is better), None when it does not match: every word of the query
+    must appear in the label, the group or the shortcut."""
+    hay = f"{c.label} {c.group} {c.shortcut}".lower()
+    words = query.lower().split()
+    if not all(w in hay for w in words):
+        return None
+    return 0 if not words or c.label.lower().startswith(words[0]) else 1
+
+
+class CommandPalette:
+    """Ctrl-P: every command with its shortcut; type to search, ↑/↓ to choose, Enter to run."""
+
+    ROWS = 16
+
+    def __init__(self, commands: list[Command], run: Callable[[Command], None]):
+        self.commands, self._run = commands, run
+        self.open = False
+        self.index = 0
+        self.buffer = Buffer(multiline=False, on_text_changed=lambda b: setattr(self, "index", 0))
+        kb = KeyBindings()
+        kb.add("up")(kb.add("c-p")(kb.add("c-k")(lambda e: self._move(-1))))
+        kb.add("down")(kb.add("c-n")(kb.add("c-j")(lambda e: self._move(1))))
+        kb.add("pageup")(lambda e: self._move(-self.ROWS))
+        kb.add("pagedown")(lambda e: self._move(self.ROWS))
+        kb.add("enter")(lambda e: self.pick())
+        kb.add("escape", eager=True)(lambda e: self.close())
+        kb.add("c-c")(lambda e: self.close())
+        self.search = Window(BufferControl(buffer=self.buffer, key_bindings=kb), height=1, style="class:palette",
+                             get_line_prefix=lambda n, w: [("class:palette.key", " > ")])
+        self.on_close: Callable[[], None] = lambda: None
+        body = HSplit([
+            self.search,
+            Window(height=1, char="─", style="class:palette.group"),
+            Window(FormattedTextControl(self._fragments), style="class:palette",
+                   height=lambda: Dimension.exact(max(1, min(self.ROWS, len(self.matches()))))),
+        ], width=Dimension.exact(72), style="class:palette")
+        self.container = ConditionalContainer(body, filter=Condition(lambda: self.open))
+
+    def matches(self) -> list[Command]:
+        q = self.buffer.text
+        ranked = [(r, i, c) for i, c in enumerate(self.commands) if (r := palette_match(q, c)) is not None]
+        return [c for _, _, c in sorted(ranked)]
+
+    def _move(self, delta: int) -> None:
+        n = len(self.matches())
+        self.index = max(0, min(n - 1, self.index + delta)) if n else 0
+
+    def pick(self, i: int | None = None) -> None:
+        found = self.matches()
+        i = self.index if i is None else i
+        if 0 <= i < len(found):
+            self.close()
+            self._run(found[i])
+
+    def close(self) -> None:
+        if self.open:
+            self.open = False
+            self.on_close()
+
+    def _fragments(self):
+        found = self.matches()
+        if not found:
+            return [("class:palette.group", "  no command matches")]
+        top = max(0, min(self.index - self.ROWS // 2, len(found) - self.ROWS))
+        words = self.buffer.text.lower().split()
+        out = []
+        for i, c in enumerate(found[top:top + self.ROWS], start=top):
+            cur = " class:list.cursor" if i == self.index else ""
+            pick = clicked(lambda i=i: self.pick(i))
+            label = f"{c.group}: {c.label}"
+            used = 2 + get_cwidth(label) + get_cwidth(c.shortcut) + 1
+            out.append(("class:palette" + cur, "  ", pick))
+            out.append(("class:palette.group" + cur, f"{c.group}: ", pick))
+            for frag_style, text in self._marked(c.label, words):
+                out.append((frag_style + cur, text, pick))
+            out.append(("class:palette" + cur, " " * max(1, 72 - used), pick))
+            out.append(("class:palette.key" + cur, c.shortcut + " ", pick))
+            out.append(("", "\n"))
+        return out[:-1]
+
+    @staticmethod
+    def _marked(label: str, words: list[str]) -> list[tuple[str, str]]:
+        """The label with the searched words in bold sky blue."""
+        marks = [False] * len(label)
+        low = label.lower()
+        for w in words:
+            at = low.find(w)
+            while w and at >= 0:
+                for k in range(at, at + len(w)):
+                    marks[k] = True
+                at = low.find(w, at + len(w))
+        out: list[tuple[str, str]] = []
+        for ch, m in zip(label, marks):
+            st = "class:palette.match" if m else "class:palette"
+            if out and out[-1][0] == st:
+                out[-1] = (st, out[-1][1] + ch)
+            else:
+                out.append((st, ch))
+        return out
+
+
 class ResultGrid:
     """Bottom pane: a result as a box table; j/k rows, h/l columns when focused."""
 
@@ -955,7 +1074,7 @@ class Session:
     catalog_stale: bool = False  # a DDL ran since: the catalog may be out of date
     state: str = "idle"  # idle | connecting | online | offline | failed
     running: bool = False
-    autotrace: bool = False  # F8 / click: plan and statistics in the trace tab (Oracle)
+    autotrace: bool = True  # on from the start; F8 / click: plan and statistics in the trace tab (Oracle)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # one DB call at a time
     connecting: asyncio.Task | None = None
     cells: list[Cell] = field(default_factory=list)  # oldest first, input cell last
@@ -1026,11 +1145,27 @@ class App:
         self.ask_window = Window(
             BufferControl(buffer=self.ask_buffer, key_bindings=ask_kb), height=1, style="class:input",
             get_line_prefix=lambda n, w: [("class:list.note", f" {self._ask['label']} " if self._ask else " ")])
+        # the template editor: the Template tab's place while a body is edited (vi keys, `:w` …)
+        self._tpl_edit: dict | None = None  # {"id": id or None for a new one, "alias", "saved": body}
+        self.editor_buffer = Buffer(multiline=True, completer=self.completer, complete_while_typing=False)
+        ed_kb = KeyBindings()
+        ed_kb.add(":", filter=vi_navigation_mode)(lambda e: self._ask_for(":", "", lambda a: None, self._editor_command))
+        ed_kb.add("Z", "Z", filter=vi_navigation_mode)(lambda e: self._editor_command("wq"))
+        ed_kb.add("Z", "Q", filter=vi_navigation_mode)(lambda e: self._editor_command("q!"))
+        ed_kb.add("c-s")(lambda e: self._editor_command("w"))
+        self.editor_window = Window(
+            BufferControl(buffer=self.editor_buffer, key_bindings=ed_kb, input_processors=[SqlHighlight()]),
+            wrap_lines=True, style="class:input",
+            get_line_prefix=lambda n, w: [("class:list.note", f"{n + 1:>3} " if not w else "    ")])
+        editing = Condition(lambda: self._tpl_edit is not None and self.panel.tab.name == "template")
+        editor = HSplit([Window(FormattedTextControl(self._editor_header), height=1, char="─", style="class:border"),
+                         self.editor_window], width=lambda: Dimension.exact(self.panel.width()))
         top = VSplit([
             shell,
             ConditionalContainer(
                 VSplit([Window(width=1, char="│", style="class:border"),
-                        HSplit([self.panel.container,
+                        HSplit([ConditionalContainer(self.panel.container, filter=~editing),
+                                ConditionalContainer(editor, filter=editing),
                                 ConditionalContainer(self.ask_window,
                                                      filter=Condition(lambda: self._ask is not None))])]),
                 filter=Condition(lambda: self.show_panel)),
@@ -1048,7 +1183,11 @@ class App:
                           Window(height=1, char="─", style="class:border")])
 
         self.fixed_panes = [self.panel.window, self.results.window]
+        self.palette = CommandPalette(self._commands(), self._run_command)
+        self.palette.on_close = self._palette_closed
+        self._palette_back = None  # the window focused when the palette opened
         root = FloatContainer(HSplit([top_bar, top, results_title, self.results.window]), floats=[
+            Float(top=2, content=self.palette.container),
             Float(xcursor=True, ycursor=True, content=CompletionsMenu(max_height=10)),
         ])
         first = self._session.input_cell.window
@@ -1067,6 +1206,81 @@ class App:
     def _session(self) -> Session:
         return self.sessions[self.active]
 
+    # -- Ctrl-P: the command palette ------------------------------------------
+    def _commands(self) -> list[Command]:
+        C = Command
+        tabs = [C("Panel", f"Open {n.title()} tab", f"Alt-{i + 1}", (ALT_DIGITS[i],)) for i, n in enumerate(PANEL_TABS)]
+        conns = [C("Cell", f"Put cell on conn{i}", f"Ctrl-W {i}", ("c-w", str(i)), "cell") for i in range(CONNECTIONS)]
+        return [
+            C("Run", "Run cell", "Ctrl-O", ("c-o",), "cell"),
+            C("Run", "Run statement under cursor", "F4", ("f4",), "cell"),
+            C("Run", "Cancel running / clear input", "Ctrl-C", ("c-c",), "cell"),
+            C("Cell", "New cell below", "Ctrl-N", ("c-n",), "cell"),
+            C("Cell", "Format SQL", "Ctrl-U", ("c-u",), "cell"),
+            C("Cell", "Clear cell text", "L (NORMAL)", ("L",), "cell-normal"),
+            C("Cell", "Go to top cell", "$ (NORMAL)", ("$",), "cell-normal"),
+            C("Cell", "Go to bottom cell", "% (NORMAL)", ("%",), "cell-normal"),
+            C("Cell", "Clear shell (keep input cell)", "Ctrl-L", ("c-l",)),
+            *conns,
+            C("Focus", "Prompt (input cell)", "Alt-0", (PROMPT_KEY,)),
+            C("Focus", "Result pane", "Alt-9", (RESULTS_KEY,)),
+            C("Focus", "Next pane", "Ctrl-W w", ("c-w", "w")),
+            C("Focus", "Previous pane", "Ctrl-W W", ("c-w", "W")),
+            C("Panel", "Show / hide panel", "Ctrl-B", ("c-b",)),
+            *tabs,
+            C("Schema", "Collect catalog", "Ctrl-O (Schema tab)", ("c-o",), "tab:schema"),
+            C("Monitor", "Take snapshot", "Ctrl-O (Monitor tab)", ("c-o",), "tab:monitor"),
+            C("Template", "Add template", "a (Template tab)", ("a",), "tab:template"),
+            C("Result", "Copy selected value", "y (result pane)", ("y",), "results"),
+            C("Result", "Copy selected row", "Y (result pane)", ("Y",), "results"),
+            C("Result", "Sort by selected column", "s (result pane)", ("s",), "results"),
+            C("Session", "Toggle autocommit", "F7", ("f7",)),
+            C("Session", "Toggle autotrace (Oracle)", "F8", ("f8",)),
+            C("Session", "Save snapshot and quit", "F1", ("f1",)),
+            C("Session", "Quit", "Ctrl-Q", ("c-q",)),
+        ]
+
+    def open_palette(self) -> None:
+        self._palette_back = self.app.layout.current_window
+        self._palette_mode = self.app.vi_state.input_mode
+        self.palette.buffer.reset()
+        self.palette.index = 0
+        self.palette.open = True
+        self.app.layout.focus(self.palette.search)
+        if self.vi:
+            self.app.vi_state.input_mode = InputMode.INSERT
+
+    def _palette_closed(self) -> None:
+        back = self._palette_back
+        try:
+            self.app.layout.focus(back)
+        except ValueError:  # gone meanwhile (an emptied cell, the editor closed)
+            self._focus_cell(self._session.input_cell, at_end=True)
+        if self.vi:
+            self.app.vi_state.input_mode = self._palette_mode
+
+    def _run_command(self, c: Command) -> None:
+        """Do what the command's shortcut does: put the focus where that key works, then feed
+        the key in (once the palette's own key is done)."""
+        keys = list(c.keys)
+        if c.where in ("cell", "cell-normal"):
+            cell = self.cell_of.get(self._palette_back) or self._target_cell()
+            if cell.window is not self.app.layout.current_window:
+                self.app.layout.focus(cell.window)
+            if self.vi and c.where == "cell-normal":
+                self.app.vi_state.input_mode = InputMode.NAVIGATION
+        elif c.where == "results":
+            self.app.layout.focus(self.results.window)
+        elif c.where.startswith("tab:"):
+            keys = [ALT_DIGITS[PANEL_TABS.index(c.where[4:])]] + keys
+
+        def feed():
+            kp = self.app.key_processor
+            for k in keys:  # "c-o" / "f4" are Keys, a single character is itself
+                kp.feed(KeyPress(k) if isinstance(k, Keys) or len(k) == 1 else KeyPress(Keys(k)))
+            kp.process_keys()
+        asyncio.get_running_loop().call_soon(feed)
+
     # -- cells ----------------------------------------------------------
     def _new_session(self, p: Profile) -> Session:
         s = Session(p)
@@ -1079,6 +1293,7 @@ class App:
         s.folder = session_dir(p.name)
         s.file_history = FileHistory(str(s.folder / "history"))
         s.runs = load_history(s.folder / "history")
+        self._load_schema(s)
         s.history = history_view(s.runs, MAX_HISTORY_ITEMS)
         snap = take_snapshot(s.folder)
         if snap is not None:
@@ -1177,7 +1392,7 @@ class App:
         s.edit_cell = pick(snap.get("edit")) or s.input_cell
         s.shown = pick(snap.get("shown"))
         s.last_run = pick(snap.get("last_run"))
-        s.autotrace = bool(snap.get("autotrace"))
+        s.autotrace = bool(snap.get("autotrace", True))
         focus = snap.get("focus")
         s.restore = {"focus": pick(focus) if isinstance(focus, int) else focus,
                      "insert": snap.get("insert", True), "result": snap.get("result") or {},
@@ -1413,7 +1628,7 @@ class App:
     def _history_items(self):
         s, now = self._session, dt.datetime.now()
         digits = len(str(len(s.runs)))  # run numbers, right-aligned: 1 is the oldest run
-        return [([("class:list.note", f"{n:>{digits}} {history_stamp(when, now)} ")]
+        return [([("class:list.id", f"{n:>{digits}} "), ("class:list.note", f"{history_stamp(when, now)} ")]
                  + highlighted(" ".join(text.split())), "", "")
                 for n, when, text in s.history]
 
@@ -1427,7 +1642,7 @@ class App:
             return head + [("(none: a adds one)", "class:list.empty", "")]
         idw = len(str(max(t.id for t in entries)))
         aw = max(len(t.alias) for t in entries) + 1
-        return head + [([("class:list.note", f"{t.id:>{idw}} "), ("class:schema.title", f"@{t.alias:<{aw}}")]
+        return head + [([("class:list.id", f"{t.id:>{idw}} "), ("class:schema.title", f"@{t.alias:<{aw}}")]
                         + highlighted(" ".join(t.body.split())), "", "")
                        for t in entries]
 
@@ -1445,37 +1660,13 @@ class App:
         if t is None:
             return
         self._tpl_delete = None
-
-        async def edit():
-            body = await self._vim(t.body)
-            if body is None or body == t.body:
-                self.say(f"@{t.alias} unchanged")
-            elif not body.strip():
-                self.say(f"@{t.alias}: an empty body is not saved (d deletes the template)", error=True)
-            else:
-                self.templates.update(t.id, body=body)
-                self.say(f"@{t.alias} saved")
-        self.app.create_background_task(edit())
+        self._open_editor(t.id, t.alias, t.body)
 
     def _template_add(self) -> None:
         self._tpl_delete = None
 
         def got(alias: str) -> None:
-            async def add():
-                body = await self._vim(f"-- @{alias}: write the query here; $1, $2 … are its arguments\n")
-                if body is not None:
-                    body = "\n".join(l for l in body.split("\n") if not l.startswith(f"-- @{alias}:")).strip("\n")
-                if not body or not body.strip():
-                    self.say(f"@{alias} not added (empty body)")
-                    return
-                try:
-                    t = self.templates.add(alias, body)
-                except TemplateError as e:
-                    self.say(str(e), error=True)
-                    return
-                self.panel.tab.cursor = 1 + [x.id for x in self.templates.entries()].index(t.id)
-                self.say(f"@{alias} added")
-            self.app.create_background_task(add())
+            self._open_editor(None, alias, "")
         self._ask_for("new alias:", "", lambda a: self.templates.check_alias(a), got)
 
     def _template_rename(self) -> None:
@@ -1539,7 +1730,8 @@ class App:
                 self.say(err, error=True)
                 return
         self._ask = None
-        self.app.layout.focus(self.panel.window)
+        back = ask["back"]
+        self.app.layout.focus(back if back is self.editor_window and self._tpl_edit else self.panel.window)
         if self.vi:
             self.app.vi_state.input_mode = InputMode.NAVIGATION
         if answer is None:
@@ -1547,34 +1739,75 @@ class App:
         else:
             ask["done"](answer)
 
-    async def _vim(self, text: str) -> str | None:
-        """Edit `text` in $VISUAL / $EDITOR (vim when neither is set), the whole screen given to
-        it; the saved text when it quits, None when it failed (`:cq`)."""
-        fd, path = tempfile.mkstemp(prefix="dbcli-template-", suffix=".sql")
-        try:
-            with os.fdopen(fd, "w") as f:
-                f.write(text if text.endswith("\n") or not text else text + "\n")
-            editor = shlex.split(os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vim")
+    def _open_editor(self, id: int | None, alias: str, body: str) -> None:
+        """Edit a body in the panel (a new template when `id` is None), in INSERT mode."""
+        self._tpl_edit = {"id": id, "alias": alias, "saved": body}
+        self.editor_buffer.reset(Document(body, 0))
+        self.app.layout.focus(self.editor_window)
+        if self.vi:
+            self.app.vi_state.input_mode = InputMode.INSERT if not body else InputMode.NAVIGATION
+        self.say("")
 
-            def call() -> int:
-                sys.stdout.write(MODIFY_OTHER_KEYS_OFF)  # the editor reads plain keys
-                sys.stdout.flush()
-                try:
-                    return subprocess.call(editor + [path])
-                except OSError as e:
-                    print(f"cannot start {editor[0]}: {e}")
-                    return 1
-                finally:
-                    sys.stdout.write(MODIFY_OTHER_KEYS_ON)
-                    sys.stdout.flush()
-            rc = await run_in_terminal(call, in_executor=True)
-            if rc != 0:
-                self.say(f"{editor[0]} exited with {rc}: nothing saved", error=True)
-                return None
-            with open(path) as f:
-                return f.read().rstrip("\n")
-        finally:
-            os.unlink(path)
+    def _editor_header(self):
+        e = self._tpl_edit
+        if e is None:
+            return []
+        changed = self.editor_buffer.text != e["saved"]
+        title = f" @{e['alias']}" + (" (new)" if e["id"] is None else f" #{e['id']}") + (" [+]" if changed else "")
+        return [("class:tab.active.focused", title + " "),
+                ("class:list.note", " :w save · :wq save+close · :q close · :q! drop · $1 $2 … arguments ")]
+
+    def _editor_save(self) -> bool:
+        e, body = self._tpl_edit, self.editor_buffer.text.rstrip()
+        if not body.strip():
+            self.say(f"@{e['alias']}: an empty body is not saved (:q! drops it; d deletes a template)", error=True)
+            return False
+        try:
+            if e["id"] is None:
+                t = self.templates.add(e["alias"], body)
+                e["id"] = t.id
+                self.say(f"@{e['alias']} added")
+            else:
+                self.templates.update(e["id"], body=body)
+                self.say(f"@{e['alias']} saved")
+        except TemplateError as err:
+            self.say(str(err), error=True)
+            return False
+        e["saved"] = self.editor_buffer.text
+        return True
+
+    def _editor_close(self) -> None:
+        e = self._tpl_edit
+        self._tpl_edit = None
+        ids = [t.id for t in self.templates.entries()]
+        if e and e["id"] in ids:
+            self.panel.tab.cursor = 1 + ids.index(e["id"])  # the edited line (row 0: the header)
+        self.app.layout.focus(self.panel.window)
+        if self.vi:
+            self.app.vi_state.input_mode = InputMode.NAVIGATION
+
+    def _editor_command(self, cmd: str) -> None:
+        """The editor's `:` commands, as in vim: w, wq / x, q, q!."""
+        e = self._tpl_edit
+        if e is None:
+            return
+        cmd = cmd.strip()
+        changed = self.editor_buffer.text != e["saved"]
+        if cmd == "w":
+            self._editor_save()
+        elif cmd in ("wq", "x"):
+            if not (changed or e["id"] is None) or self._editor_save():
+                self._editor_close()
+        elif cmd == "q":
+            if changed:
+                self.say("unsaved changes: :wq saves, :q! drops them", error=True)
+            else:
+                self._editor_close()
+        elif cmd == "q!":
+            self._editor_close()
+            self.say(f"@{e['alias']}: " + ("not added" if e["id"] is None else "changes dropped"))
+        elif cmd:
+            self.say(f"not an editor command: :{cmd} (w, wq, x, q, q!)", error=True)
 
     # -- monitor: sessions, blocking, locks, top SQL, waits; refreshed while it shows ---------
     def _monitor_items(self):
@@ -1618,9 +1851,47 @@ class App:
                 self.app.invalidate()
 
     # -- schema browser: kinds -> objects -> an object's details (and DDL) --------------
+    # -- the schema tab and the catalog outlive the terminal: sessions/<name>/schema.json -----
+    def _save_schema(self, s: Session) -> None:
+        b = s.browser
+        try:
+            save_schema(s.folder, {
+                "level": b.level, "kinds": b.kinds, "kind": b.kind, "objects": b.objects, "name": b.name,
+                "lines": b.lines, "ddl": b.ddl, "cursors": b.cursors,
+                "relations": s.relations, "objects_names": sorted(s.objects) if s.objects is not None else None,
+                "columns": {t: sorted(c) if c is not None else None for t, c in s.columns.items()},
+                "catalog_when": s.catalog_when.isoformat() if s.catalog_when else None,
+                "catalog_stale": s.catalog_stale})
+        except (OSError, TypeError, ValueError) as e:
+            self.say(f"schema tab not saved: {e}", error=True)
+
+    def _load_schema(self, s: Session) -> None:
+        d = load_schema(s.folder)
+        if not d:
+            return
+        try:
+            b = s.browser
+            b.level = d.get("level") if d.get("level") in ("kinds", "objects", "detail") else "kinds"
+            b.kinds = [tuple(k) for k in d["kinds"]] if d.get("kinds") is not None else None
+            b.kind, b.name, b.ddl = d.get("kind", ""), d.get("name", ""), d.get("ddl", "")
+            b.objects = [tuple(o) for o in d.get("objects") or []]
+            b.lines = [[tuple(f) for f in line] for line in d.get("lines") or []]
+            b.cursors = dict(d.get("cursors") or {})
+            s.relations = [tuple(r) for r in d.get("relations") or []]
+            if d.get("objects_names") is not None:
+                s.objects = set(d["objects_names"])
+                s.objects_sorted = sorted(s.objects)
+            s.columns = {t: frozenset(c) if c is not None else None for t, c in (d.get("columns") or {}).items()}
+            for w in {w for t, cols in s.columns.items() for w in [t, *(cols or ())]} | {n for n, _ in s.relations}:
+                self.words.add_base(w, 5)
+            s.catalog_when = dt.datetime.fromisoformat(d["catalog_when"]) if d.get("catalog_when") else None
+            s.catalog_stale = bool(d.get("catalog_stale"))
+        except (KeyError, TypeError, ValueError):
+            s.browser = Browser()  # a damaged file: start the tab afresh
+
     def _schema_items(self):
         s, b = self._session, self._session.browser
-        if s.db is None:
+        if s.db is None and b.kinds is None:
             return [("not connected", "class:list.note", "")]
         if b.loading:
             return [("loading…", "class:list.note", "")]
@@ -1666,6 +1937,7 @@ class App:
         if b.level in ("objects", "detail"):
             b.level = "kinds" if b.level == "objects" else "objects"
             self.panel.tab.cursor = b.cursors.get(b.level, 0)
+            self._save_schema(self._session)
             self.app.invalidate()
 
     def _schema_collect(self) -> None:
@@ -1702,6 +1974,7 @@ class App:
             if detail is not None:
                 b.lines, b.ddl = schema_lines(detail), ""
             s.catalog_when, s.catalog_stale = dt.datetime.now(), False
+            self._save_schema(s)
             self.say(f"catalog: {len(names)} objects, {len(relations)} tables and views, "
                      f"{len(pairs)} columns")
         except Exception as e:
@@ -1759,6 +2032,7 @@ class App:
                 elif what == "ddl":
                     b.ddl = await loop.run_in_executor(None, schema.ddl, s.db, b.kind, b.name)
                     b.lines = schema_lines_without_ddl(b.lines) + ddl_lines(b.ddl)
+            self._save_schema(s)
         except Exception as e:
             self.say(f"schema: {error_text(e)}", error=True)
         finally:
@@ -2138,14 +2412,16 @@ class App:
         # the two switches, each with its key (or click it)
         if s.db is not None:
             on = s.db.autocommit
-            left += [sep, ("class:top.mode" if on else "class:top", f"autocommit {'on' if on else 'off'}",
-                           clicked(self.toggle_autocommit)), ("class:top.dim", " F7")]
+            left += [sep, ("class:top.mode" if on else "class:top", "autocommit ", clicked(self.toggle_autocommit)),
+                     ("class:top.mode" if on else "class:top.off", "on" if on else "off", clicked(self.toggle_autocommit)),
+                     ("class:top.dim", " F7")]
         if s.profile.type == "oracle":
-            left += [sep, ("class:top.mode" if s.autotrace else "class:top",
-                           f"autotrace {'on' if s.autotrace else 'off'}", clicked(self.toggle_autotrace)),
+            on = s.autotrace
+            left += [sep, ("class:top.mode" if on else "class:top", "autotrace ", clicked(self.toggle_autotrace)),
+                     ("class:top.mode" if on else "class:top.off", "on" if on else "off", clicked(self.toggle_autotrace)),
                      ("class:top.dim", " F8")]
         left += [sep, ("class:top.dim", f"{s.profile.type} · {s.profile.target()}")]
-        right = " Ctrl-O run · Ctrl-N new cell · Ctrl-0~2 / Ctrl-W 0~3 conn · F4 statement · Ctrl-C cancel · ↑↓ cells · Alt-1~4 panel · Alt-9 result · Alt-0 prompt · Ctrl-W hjkl move · F1 save+quit · Ctrl-Q quit "
+        right = " Ctrl-P commands · Ctrl-O run · Ctrl-N new cell · Ctrl-0~2 / Ctrl-W 0~3 conn · F4 statement · Ctrl-C cancel · ↑↓ cells · Alt-1~5 panel · Alt-9 result · Alt-0 prompt · Ctrl-W hjkl move · F1 save+quit · Ctrl-Q quit "
         used = sum(get_cwidth(f[1]) for f in left)
         room = get_app().output.get_size().columns - used - get_cwidth(right)
         return left + ([("", " " * room), ("class:top.dim", right)] if room > 0 else [])
@@ -2201,7 +2477,8 @@ class App:
             def _(event, i=i):
                 self.show_panel = True
                 self.panel.select(i)
-                event.app.layout.focus(self.panel.window)
+                editing = self._tpl_edit is not None and self.panel.tab.name == "template"
+                event.app.layout.focus(self.editor_window if editing else self.panel.window)
 
         # PageUp / PageDown always scroll the panel, wherever the focus is
         @kb.add("pageup")
@@ -2240,6 +2517,14 @@ class App:
             self._focus_cell(self._session.input_cell, at_end=True)
             if self.vi:
                 event.app.vi_state.input_mode = InputMode.INSERT
+
+        @kb.add("c-p")
+        def _(event):  # the command palette (in the completion menu, Ctrl-P still moves up in it)
+            buf = event.app.current_buffer
+            if buf.complete_state:
+                buf.complete_previous()
+                return
+            self.open_palette()
 
         @kb.add("c-b")
         def _(event):
@@ -2435,6 +2720,10 @@ class App:
             cells = self._editable(self._session)
             if cells:
                 self._focus_cell(cells[0], at_end=False)
+
+        @kb.add("%", filter=in_shell & vi_navigation_mode)
+        def _(event):  # NORMAL `%` (Shift+5): the bottom cell; `d%` and visual `%` keep their meaning
+            self._focus_cell(self._session.input_cell, at_end=True)
 
         @kb.add("c-n", filter=in_shell)
         def _(event):  # a new cell below the one under the cursor
@@ -2840,6 +3129,8 @@ class App:
                 self.app.output.flush()
                 self.activate(0)
                 self._apply_restore(self._session)
+                b = self._session.browser  # the schema tab back where it was left
+                self.panel.tabs[PANEL_TABS.index("schema")].cursor = 0 if b.level == "detail" else b.cursors.get(b.level, 0)
                 self.app.create_background_task(self.refresh_suggestions())
                 self.app.create_background_task(self.spin_loop())
             self.app.run(pre_run=start)
@@ -2848,6 +3139,8 @@ class App:
             sys.stdout.flush()
             self.words.save()
             for s in self.sessions.values():
+                if s.browser.kinds is not None or s.objects is not None:
+                    self._save_schema(s)  # the catalog's stale mark too
                 for db in [s.db] + s.extra:
                     if db is not None:
                         try:

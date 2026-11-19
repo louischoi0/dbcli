@@ -77,10 +77,10 @@ Panel tabs:
 | History | This connection's queries, newest first, up to 500. Each row starts with its run number and when it ran (`HH:MM` today, `MM-DD` before). Numbers count up like an auto-increment: the first query ever run on the connection is 1, each run takes the next one, and they never change. A query run again moves to the top under its new number. Hints are colored as in the input area. |
 | Schema | A schema browser (section 6.2): the kinds of objects with their counts, a kind's objects, then one object's details (columns, indexes, constraints, triggers, arguments, compile errors) and its DDL. |
 | Monitor | Sessions, blocking, locked objects, top SQL and wait events, read when you press Ctrl-O in the tab (section 6.3). |
-| Template | The saved templates (section 5.4), one to a line: id, `@alias` and body. Enter edits a body in vim; `a` adds, `r` renames, `d` deletes. |
+| Template | The saved templates (section 5.4), one to a line: id, `@alias` and body. Enter edits a body right in the panel (vi keys, `:wq`); `a` adds, `r` renames, `d` deletes. |
 | Trace | With autotrace on (Oracle): the run's **estimated plan** (EXPLAIN PLAN + DBMS_XPLAN), **actual plan** (DISPLAY_CURSOR `ALLSTATS LAST`) and **session statistics**, drawn as a tree (section 6.1). It shows the trace of the cell focused in the shell. |
 
-Colors are soft grays with sky blue: the focused pane's title (the selected tab in the panel), the prompt, table headers and `online` are sky blue; only offline and errors are red. Ctrl-B hides the panel so the shell takes the full width.
+Colors are soft grays with sky blue: the focused pane's title (the selected tab in the panel), the prompt, table headers and `online` are sky blue; only offline and errors are red. Orange marks `conn0` in a cell's prompt, an `off` switch in the top bar (`autocommit off`, `autotrace off`) and the numbers in the panel (History's run numbers, Template's ids). Ctrl-B hides the panel so the shell takes the full width.
 The layout follows the terminal's size. Panes, tabs, list items and the two switches in the top bar can be clicked.
 
 ## 4. Keys
@@ -91,6 +91,7 @@ The layout follows the terminal's size. Panes, tabs, list items and the two swit
 |---|---|
 | **`Ctrl-O`** | Runs the whole input area (no `;` needed), in INSERT and NORMAL mode. |
 | **`$`** (NORMAL) | Jumps to the top cell. `d$`, `c$` and `$` in VISUAL keep their usual meaning. |
+| **`%`** (NORMAL) | Jumps to the bottom cell (the input cell), at the end of its text, staying in NORMAL mode. `d%`, `c%` and `%` in VISUAL keep their usual meaning (vim's "matching bracket" is replaced). |
 | **`Ctrl-N`** | A new empty cell below the cell under the cursor, focused in INSERT mode (with the completion menu open, Ctrl-N still moves in it). |
 | `Alt+Enter`, `F5` | The same. |
 | `Ctrl+Enter` | The same, where the terminal sends Ctrl+Enter distinctly from Enter (below). |
@@ -161,7 +162,7 @@ Directions follow where the panes are drawn: from the prompt `Ctrl-W l` is the p
 | Key | Does |
 |---|---|
 | `→` / `←`, `l` / `h`, `Tab` / `Shift-Tab` | Next / previous tab (wrapping around) |
-| `1` … `4` | History / Schema / Trace / Monitor |
+| `1` … `5` | History / Schema / Trace / Monitor / Template |
 | `j` / `k`, `↓` / `↑` | Moves the selection |
 | `g` / `G`, `Home` / `End` | Top / bottom |
 | `PageUp` / `PageDown` | Scroll the panel a screen at a time, **wherever the focus is** (the prompt, the result pane, the panel) |
@@ -172,6 +173,12 @@ Directions follow where the panes are drawn: from the prompt `Ctrl-W l` is the p
 |---|---|
 | History | Puts the query in the input area, without running it: edit, then Ctrl-O. |
 | Schema | Opens the kind or the object under the selection (section 6.2). |
+
+### Command palette (`Ctrl-P`)
+
+`Ctrl-P` (anywhere, any mode) opens a list of every command with its shortcut, like VS Code's. Type to search: each word must appear in the command's name, its group or its key (`run`, `format`, `ctrl-u`, `templ`), and the words show in bold blue. `↑` / `↓` (or `Ctrl-P` / `Ctrl-N`, `Ctrl-K` / `Ctrl-J`, `PageUp` / `PageDown`) choose, `Enter` or a click runs it, `Esc` closes the list.
+
+A command does exactly what its key does, where that key works: a cell command (run, format, new cell, conn0…3) acts on the cell you were in (or the cell edited last), a tab command opens its tab first (Schema's Ctrl-O, Template's `a`), a result command works on the result pane. With the completion menu open, `Ctrl-P` still moves up in it. (vim's NORMAL-mode Ctrl-P, "line up", and emacs mode's "previous line" are replaced; use `k` / `↑`.)
 
 ### Switches and the rest
 
@@ -243,7 +250,7 @@ from my▏Table  ← Tab → "from MyTable " (the stored spelling, the typed par
 
 #### Oracle hints
 
-On an Oracle connection the optimizer hints (`gather_plan_statistics`, `use_hash`, `leading`, `index_ffs`, `parallel`, `no_merge` and more) join the suggestions, following your case like keywords: `/*+ gath` → `gather_plan_statistics`, `/*+ GATH` → `GATHER_PLAN_STATISTICS`. In the input area, the History tab and the result title, SQL is drawn in a soft white, keywords (`select`, `from`, `where` …) in bold sky blue, table and view names in bold white, operators and punctuation (`,` `(` `)` `+` `-` `*` `/` `|` `=` `<>` … and the `/*` `*/` around comments) in a pale pink bold, and hints inside `/*+ ... */` in bold pure white, so they stand out, and what their parentheses name (table aliases, index names, `@query_block`s) in a warm sand color: `/*+ index(e emp_ix) */`. The list is `src/dbcli/oracle_hints.py`.
+On an Oracle connection the optimizer hints (`gather_plan_statistics`, `use_hash`, `leading`, `index_ffs`, `parallel`, `no_merge` and more) join the suggestions, following your case like keywords: `/*+ gath` → `gather_plan_statistics`, `/*+ GATH` → `GATHER_PLAN_STATISTICS`. In the input area, the History tab and the result title, SQL is drawn in a soft white, keywords (`select`, `from`, `where` …) in bold sky blue, table and view names in bold peach, operators and punctuation (`,` `(` `)` `+` `-` `*` `/` `|` `=` `<>` … and the `/*` `*/` around comments) in a pale pink bold, and hints inside `/*+ ... */` in bold pure white, so they stand out, and what their parentheses name (table aliases, index names, `@query_block`s) in a warm sand color: `/*+ index(e emp_ix) */`. The list is `src/dbcli/oracle_hints.py`.
 
 ### 5.3.2 Missing tables, views and columns
 
@@ -295,12 +302,23 @@ who = "select * from emp where name = $1"
 
 | Key | Does |
 |---|---|
-| `Enter` / `e` | Edits the body in vim (`$VISUAL` or `$EDITOR` when set), full screen; `:wq` saves, `:q!` keeps the old body, `:cq` saves nothing. An emptied body is not saved |
-| `a` | Adds one: asks for the alias under the panel (Enter answers, Esc drops it, Ctrl-U clears), then opens vim for the body. An empty body adds nothing |
+| `Enter` / `e` | Edits the body in the panel, in place of the list, with the input area's vi keys and SQL colors (NORMAL mode to start; `i`, `A` … to type). The header shows `@alias #id`, and `[+]` while there are unsaved changes |
+| `a` | Adds one: asks for the alias under the panel (Enter answers, Esc drops it, Ctrl-U clears), then opens the editor on an empty body in INSERT mode. It is added on the first `:w`; an empty body adds nothing |
 | `r` | Renames the alias (asked the same way) |
 | `d` `d` | Deletes the template (the first `d` asks, the second deletes) |
 | `i` | Puts `@alias ` at the cursor of the input area: type its arguments, then Tab |
 | `y` | Copies the body |
+
+In the editor (NORMAL mode):
+
+| Key | Does |
+|---|---|
+| `:w` (or `Ctrl-S` in any mode) | Saves |
+| `:wq`, `:x`, `ZZ` | Saves and goes back to the list |
+| `:q` | Back to the list; refused while there are unsaved changes |
+| `:q!`, `ZQ` | Back to the list, dropping the changes (a new template is not added) |
+
+The `:` line opens under the panel: Enter runs it, Esc drops it. Other tabs can be opened meanwhile; `Alt-5` comes back to the editor as it was.
 
 The file is shared by every dbcli terminal: a change made in one shows in the others.
 
@@ -328,7 +346,7 @@ The file is shared by every dbcli terminal: a change made in one shows in the ot
 
 ### 6.1 Autotrace (Oracle)
 
-Turn it on with **F8** (or click `autotrace` in the top bar) and run a statement. The Trace tab opens with:
+It is **on from the start**; **F8** (or a click on `autotrace` in the top bar) turns it off and on again. Run a statement with it on and the Trace tab opens with:
 
 ```
 ▌ Execution Plan · estimated
@@ -383,7 +401,7 @@ Turn it on with **F8** (or click `autotrace` in the top bar) and run a statement
 
 ### 6.2 Schema browser
 
-`Alt-2` opens it. Three levels:
+`Alt-2` opens it. What it last showed, and the catalog Ctrl-O collected, are kept per connection (`schema.json`): after a restart the tab is where you left it, even before the connection is back, and completion has the catalog at once. Ctrl-O reads it all again. Three levels:
 
 1. **Kinds** with their counts: tables, views, materialized views, indexes, sequences, synonyms, triggers, procedures, functions, packages, types (Oracle: the user's own objects; PostgreSQL: the current schema; SQLite: all).
 2. **Objects** of a kind, with when each last changed; an invalid one shows red with `INVALID`.
@@ -511,6 +529,7 @@ password = "tiger"
 | `.dbclidata/config.toml` | Connections (passwords included) and settings (section 7) |
 | `.dbclidata/sessions/<connection>/history` | That connection's queries (the History tab) |
 | `.dbclidata/sessions/<connection>/snapshot.json` | F1's snapshot, read by the next start and then moved to `snapshot.prev.json` |
+| `.dbclidata/sessions/<connection>/schema.json` | The Schema tab where it was left (kinds, a kind's objects, an object's details and DDL) and the catalog Ctrl-O collected, so both are back after a restart |
 | `.dbclidata/sessions/<connection>/last.json` | That connection's last run: its text, outcome, result rows (up to 1000) and trace |
 | `.dbclidata/templates.json` | The templates (id, alias, body), edited in the Template tab; made from `[templates]` on first start |
 | `.dbclidata/words.db` | Word use counts for the gray suggestions, shared by all connections; saved on every run |
