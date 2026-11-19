@@ -35,6 +35,7 @@ OPERATION_STYLES: tuple[tuple[re.Pattern, str], ...] = tuple((re.compile(p), s) 
     (r"^(PX |PARTITION )", "class:op.parallel"),
 ))
 KEY_STATS = {"consistent gets", "physical reads", "db block gets", "redo size"}
+IVORY_STATS = {"recursive calls", "consistent gets", "rows processed"}  # the name bold ivory, the value bold orange
 STAT_RE = re.compile(r"^\s*(\d+)\s{2}(.+)$")
 PREDICATE_RE = re.compile(r"^(\s*)(\d+)\s-\s(access|filter)(.*)$")
 SECTION_TITLES = {"Execution Plan": "Execution Plan · estimated", "Statistics": "Statistics"}
@@ -113,18 +114,18 @@ def _metrics(row: dict) -> Fragments:
     """The figures beside an operation: estimates, or actuals when the plan has them."""
     parts: Fragments = []
 
-    def add(label: str, value: str, style: str = "class:trace.value") -> None:
+    def add(label: str, value: str, style: str = "class:trace.value", label_style: str = "class:trace.dim") -> None:
         if value:
             if parts:
                 parts.append(("class:trace.dim", " · "))
-            parts.append(("class:trace.dim", f"{label} " if label else ""))
+            parts.append((label_style, f"{label} " if label else ""))
             parts.append((style, value))
 
     if "A-Rows" in row:
         e, a = row.get("E-Rows", ""), row.get("A-Rows", "")
         off = _far_off(e, a)
         add("estimated", e)
-        add("actual", a, "class:trace.warn" if off else "class:trace.strong")
+        add("actual", a, "class:trace.warn" if off else "class:trace.strong", label_style="class:trace.rowlabel")
         add("buffers", row.get("Buffers", ""))
         add("", _seconds(row.get("A-Time", "")))
     else:
@@ -207,6 +208,9 @@ def _stats(block: list[str]) -> list[Fragments]:
                              f"  {line.strip()}")])
             continue
         value, name = m.group(1), m.group(2)
+        if name in IVORY_STATS:  # the ones read first: always bold ivory, zeros too
+            out.append([("class:trace.ivory.value", f"{int(value):>11,}"), ("", "  "), ("class:trace.ivory", name)])
+            continue
         if name == "rows processed":
             style = "class:trace.strong"
         elif value == "0":

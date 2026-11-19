@@ -1,9 +1,9 @@
 import asyncio
 import unittest
 
-from dbcli.ai import Assistant, Chat, catalog_text, last_sql, system_prompt, user_message
+from dbcli.ai import KEEP_TURNS, Assistant, Chat, Turn, catalog_text, cell_refs, last_sql, system_prompt, user_message
 from dbcli.config import AISettings
-from dbcli.ui import answer_lines, wrap_text
+from dbcli.ui import answer_lines, marked_refs, wrap_text
 
 
 class PromptTest(unittest.TestCase):
@@ -25,6 +25,20 @@ class PromptTest(unittest.TestCase):
         self.assertIn("<context>", msg)
         self.assertIn("select * form t", msg)
         self.assertIn("ORA-00923", msg)
+
+    def test_cell_refs(self):
+        self.assertEqual(cell_refs("compare @c0 with @c2, then @c0 again"), [0, 2])
+        self.assertEqual(cell_refs("mail a@c1 or @c1x or email@c3"), [])  # not a reference
+
+    def test_named_cells_replace_the_focused_one(self):
+        msg = user_message("why does @c1 fail?", "select 9", "", cells=[(1, "select * form t", "ERROR: ORA-00923")])
+        self.assertIn("Cell #c1 (the question's @c1):\nselect * form t\nIts last run:\nERROR: ORA-00923", msg)
+        self.assertNotIn("select 9", msg)  # the focused cell is not sent then
+        self.assertIn("(empty)", user_message("@c0?", cells=[(0, "  ", "")]))
+
+    def test_refs_are_colored(self):
+        self.assertEqual(marked_refs("fix @c0 now", "b"), [("b", "fix "), ("class:ai.ref", "@c0"), ("b", " now")])
+        self.assertEqual(marked_refs("", "b"), [("b", "")])
 
 
 class AnswerTest(unittest.TestCase):
@@ -108,6 +122,42 @@ class AssistantTest(unittest.TestCase):
         _, chat, _, err = self.run_ask(FakeStream([], stop="refusal"))
         self.assertIn("declined", str(err))
         self.assertEqual(chat.messages, [])
+
+
+    def test_history_goes_back_as_text_only(self):
+        client, chat, _, _ = self.run_ask(FakeStream(["ok"]))
+        self.assertEqual(chat.messages[-1], {"role": "assistant", "content": [{"type": "text", "text": "ok"}]})
+
+
+class ChatHistoryTest(unittest.TestCase):
+    def chat_of(self, n):
+        chat = Chat()
+        for i in range(n):
+            chat.turns.append(Turn(f"q{i}", f"a{i}", done=True, sent=f"q{i} + context"))
+        return chat
+
+    def test_keeps_the_latest_ten(self):
+        chat = self.chat_of(13)
+        chat.trim()
+        self.assertEqual(KEEP_TURNS, 10)
+        self.assertEqual([t.question for t in chat.turns], [f"q{i}" for i in range(3, 13)])
+        self.assertEqual(chat.messages[0], {"role": "user", "content": "q3 + context"})
+        self.assertEqual(len(chat.messages), 20)
+
+    def test_failed_turns_are_shown_not_sent(self):
+        chat = self.chat_of(2)
+        chat.turns.insert(1, Turn("bad", "half an ans", error="stopped", done=True, sent="bad"))
+        chat.rebuild()
+        self.assertEqual([m["content"] for m in chat.messages if m["role"] == "user"], ["q0 + context", "q1 + context"])
+        self.assertEqual(len(chat.turns), 3)
+
+    def test_round_trip_through_json(self):
+        chat = self.chat_of(12)
+        chat.turns.append(Turn("still running"))  # not done: not saved
+        back = Chat.from_json(chat.to_json())
+        self.assertEqual([t.question for t in back.turns], [f"q{i}" for i in range(2, 12)])
+        self.assertEqual(back.messages[-1]["content"], [{"type": "text", "text": "a11"}])
+        self.assertEqual(Chat.from_json("garbage").turns, [])
 
 
 if __name__ == "__main__":

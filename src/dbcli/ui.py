@@ -55,10 +55,12 @@ from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
 
 from .abbrev import Abbreviations
-from .ai import Assistant, Chat, Turn, error_message, last_sql, system_prompt, user_message
+from .ai import (CELL_REF_RE, Assistant, Chat, Turn, cell_refs, error_message, last_sql, system_prompt,
+                 user_message)
 from .subscription import activate as subscription_activate, mask as mask_key
 from .config import DATA_DIR, PANEL_TABS, AISettings, Profile, UISettings, load as load_config
-from .store import (history_stamp, history_view, load_history, load_last, load_schema, save_last, save_schema,
+from .store import (history_stamp, history_view, load_chat, load_history, load_last, load_schema, save_chat,
+                    save_last, save_schema,
                     save_snapshot,
                     session_dir, take_snapshot)
 from .db import (MAX_ROWS, PAGE_ROWS, changes_schema, error_text, format_table, is_connection_error, is_parse_error,
@@ -99,10 +101,12 @@ SPIN_INTERVAL = 0.1
 RUN_KEY = Keys.ControlF24
 for _seq in ("\x1b[27;5;13~", "\x1b[13;5u"):
     ANSI_SEQUENCES[_seq] = RUN_KEY
-# Alt+9 focuses the result pane, Alt+0 the prompt (ESC 9 / ESC 0, one key like Alt+1..4).
-RESULTS_KEY, PROMPT_KEY = Keys.ControlF18, Keys.ControlF17
-ANSI_SEQUENCES["\x1b9"] = RESULTS_KEY
-ANSI_SEQUENCES["\x1b0"] = PROMPT_KEY
+# Alt+8 focuses the prompt, Alt+9 the side panel, Alt+0 the result pane (ESC 8 / 9 / 0, one
+# key like Alt+1..6).
+PROMPT_KEY, PANEL_KEY, RESULTS_KEY = Keys.ControlF17, Keys.ControlF10, Keys.ControlF18
+ANSI_SEQUENCES["\x1b8"] = PROMPT_KEY
+ANSI_SEQUENCES["\x1b9"] = PANEL_KEY
+ANSI_SEQUENCES["\x1b0"] = RESULTS_KEY
 # Shift+Tab as tmux sends it once modified keys are asked for (xterm modifyOtherKeys form).
 ANSI_SEQUENCES["\x1b[27;2;9~"] = Keys.BackTab
 # Alt+Enter and Alt+1/2/3/4 arrive as ESC+key in one burst. Parsing them as single keys
@@ -122,7 +126,8 @@ MODIFY_OTHER_KEYS_ON, MODIFY_OTHER_KEYS_OFF = "\x1b[>4;1m", "\x1b[>4;0m"
 
 # One palette for everything: soft grays, sky blue for focus/accents, muted red for trouble.
 SKY, SKY_DEEP = "#8cc8ec", "#5f87af"
-ORANGE = "#ff8700"  # conn0's prompt, a switch that is off, the ids in the panel
+ORANGE = "#ff8700"  # conn0's prompt, a switch that is off, the ids in the panel, the AI prompt>
+AI_PROMPT = "prompt>"  # the AI tab's question line
 TEXT, LIGHT, DIM, FAINT = "#bcbcbc", "#dadada", "#7a7a7a", "#4a4a4a"
 SELECT_BG, MENU_BG, ERROR = "#2d3d48", "#262a2d", "#d78787"
 CELL_BG, STALE = "#1f2a31", "#d7af87"
@@ -137,9 +142,9 @@ STYLE = Style.from_dict({
     "hint": "#ececec bold",  # optimizer hints in /*+ ... */: a touch softer than pure white
     "hint.frame": "#fadde9 bold",  # the /*+ and */ around them: as other symbols
     "symbol": "#fadde9 bold",  # , ( ) + - * / | = < > … : a pale pink, bold
-    "hint.arg": "#d7af87",
+    "hint.arg": "#d7af87",  # what a hint names in its parentheses: aliases, indexes, @query blocks
     "missing": "#ff6b6b underline",  # a table, view or column the database does not have
-    "relation missing": "#ff6b6b bold underline",  # a missing table stays bold, as relation names are  # what a hint names in its parentheses: aliases, indexes, @query blocks
+    "relation missing": "#ff6b6b bold underline",  # a missing table stays bold, as relation names are
     "prompt": f"{SKY} bold",
     "prompt.dim": FAINT,
     "prompt.num": DIM,  # `#c0`: the cell's number from the top
@@ -175,6 +180,8 @@ STYLE = Style.from_dict({
     "ai.you": f"{SKY} bold",  # a question
     "ai.text": "#d0d0d0",  # an answer's prose
     "ai.code": FAINT,  # the bar in front of an answer's SQL
+    "ai.prompt": f"{ORANGE} bold",  # `prompt>` in front of the AI question line
+    "ai.ref": f"{SKY} bold",  # `@c0` in a question: that cell's SQL goes along
     # schema browser
     "schema.kind": f"{LIGHT} bold",
     "schema.title": f"{SKY} bold",
@@ -244,6 +251,9 @@ STYLE = Style.from_dict({
     "trace.key": f"{SKY} bold",
     "trace.warn": f"{STALE} bold",
     "trace.statname": TEXT,
+    "trace.ivory": "#eee8d0 bold",  # recursive calls, consistent gets, rows processed (the names)
+    "trace.ivory.value": f"{ORANGE} bold",  # … and their values
+    "trace.rowlabel": f"{ORANGE} bold",  # `actual` in the actual plan
     "trace.access": "#7ee787 bold",
     "trace.filter": "#e3c35a bold",
     "scrollbar.background": "bg:#2a2a2a",
@@ -553,6 +563,32 @@ class ScrollingControl(FormattedTextControl):
 
     def move_cursor_up(self) -> None:
         self._move(-1)
+
+
+def marked_refs(text: str, base: str) -> list[tuple[str, str]]:
+    """`text` in `base` style, its `@c0` cell references in bold sky blue."""
+    out, at = [], 0
+    for m in CELL_REF_RE.finditer(text):
+        if m.start() > at:
+            out.append((base, text[at:m.start()]))
+        out.append(("class:ai.ref", m.group(0)))
+        at = m.end()
+    if at < len(text) or not out:
+        out.append((base, text[at:]))
+    return out
+
+
+class RefHighlight(Processor):
+    """The AI question line: `@c0` … in bold sky blue as it is typed (same text, same width)."""
+
+    def __init__(self, active: Callable[[], bool]):
+        self.active = active
+
+    def apply_transformation(self, ti):
+        if not self.active():
+            return Transformation(ti.fragments)
+        text = "".join(f[1] for f in ti.fragments)
+        return Transformation(marked_refs(text, "class:input"))
 
 
 def wrap_text(text: str, width: int) -> list[str]:
@@ -1153,6 +1189,7 @@ class App:
         self._ai_mtime = self._config_mtime()
         self.assistant = Assistant(self.ai_settings.effective())
         self._ai_task = None  # the question being answered (Ctrl-C in the AI tab stops it)
+        self._ai_anyway = False  # `a` in the subscription picker: ask with the SDK's own key lookup
         self.profiles = profiles
         self.abbrevs = abbrevs
         self.templates = templates
@@ -1202,8 +1239,11 @@ class App:
         ask_kb.add("c-c")(lambda e: self._ask_done(None))
         ask_kb.add("c-u")(lambda e: self.ask_buffer.delete_before_cursor(self.ask_buffer.cursor_position))
         self.ask_window = Window(
-            BufferControl(buffer=self.ask_buffer, key_bindings=ask_kb), height=1, style="class:input",
-            get_line_prefix=lambda n, w: [("class:list.note", f" {self._ask['label']} " if self._ask else " ")])
+            BufferControl(buffer=self.ask_buffer, key_bindings=ask_kb,
+                          input_processors=[RefHighlight(lambda: bool(self._ask) and self._ask["label"] == AI_PROMPT)]),
+            height=1, style="class:input",
+            get_line_prefix=lambda n, w: [("class:ai.prompt" if self._ask and self._ask["label"] == AI_PROMPT
+                                           else "class:list.note", f" {self._ask['label']} " if self._ask else " ")])
         # the template editor: the Template tab's place while a body is edited (vi keys, `:w` …)
         self._tpl_edit: dict | None = None  # {"id": id or None for a new one, "alias", "saved": body}
         self.editor_buffer = Buffer(multiline=True, completer=self.completer, complete_while_typing=False)
@@ -1273,6 +1313,7 @@ class App:
         return [
             C("Run", "Run cell", "Ctrl-O", ("c-o",), "cell"),
             C("Run", "Run statement under cursor", "F4", ("f4",), "cell"),
+            C("Run", "Run line under cursor", "O (NORMAL)", ("O",), "cell-normal"),
             C("Run", "Cancel running / clear input", "Ctrl-C", ("c-c",), "cell"),
             C("Cell", "New cell below", "Ctrl-N", ("c-n",), "cell"),
             C("Cell", "Format SQL", "Ctrl-U", ("c-u",), "cell"),
@@ -1281,8 +1322,9 @@ class App:
             C("Cell", "Go to bottom cell", "% (NORMAL)", ("%",), "cell-normal"),
             C("Cell", "Clear shell (keep input cell)", "Ctrl-L", ("c-l",)),
             *conns,
-            C("Focus", "Prompt (input cell)", "Alt-0", (PROMPT_KEY,)),
-            C("Focus", "Result pane", "Alt-9", (RESULTS_KEY,)),
+            C("Focus", "Prompt (input cell)", "Alt-8", (PROMPT_KEY,)),
+            C("Focus", "Side panel", "Alt-9", (PANEL_KEY,)),
+            C("Focus", "Result pane", "Alt-0", (RESULTS_KEY,)),
             C("Focus", "Next pane", "Ctrl-W w", ("c-w", "w")),
             C("Focus", "Previous pane", "Ctrl-W W", ("c-w", "W")),
             C("Panel", "Show / hide panel", "Ctrl-B", ("c-b",)),
@@ -1356,6 +1398,7 @@ class App:
         s.file_history = FileHistory(str(s.folder / "history"))
         s.runs = load_history(s.folder / "history")
         self._load_schema(s)
+        s.chat = Chat.from_json(load_chat(s.folder))  # the AI tab's latest questions, from the last run
         s.history = history_view(s.runs, MAX_HISTORY_ITEMS)
         snap = take_snapshot(s.folder)
         if snap is not None:
@@ -1894,7 +1937,7 @@ class App:
         self.assistant = Assistant(self.ai_settings.effective())
 
     def _ai_picking(self) -> bool:
-        return not self.ai_settings.has_key() and not self._session.chat.turns
+        return not self.ai_settings.has_key() and not self._ai_anyway
 
     def _ai_picker_items(self):
         ai = self.ai_settings
@@ -1946,16 +1989,12 @@ class App:
         head = [([("class:schema.title", "AI"), ("class:list.note", f"  {st.model} · Enter ask · i insert SQL · y copy · c new chat · Ctrl-C stop")],
                  "", "")]
         if not chat.turns:
-            return head + [(t, "class:list.note", "") for t in (
-                "Ask about SQL: Enter (or a) here, type, Enter.",
-                "Sent along: the database type, the catalog Ctrl-O",
-                "collected, the focused cell's SQL and its last error.",
-                "Result rows are never sent.")]
+            return head
         out = list(head)
         for turn in chat.turns:
             out.append(("", "", ""))
             for k, line in enumerate(wrap_text(turn.question, width - 2) or [""]):
-                out.append(([("class:ai.you", "▸ " if k == 0 else "  "), ("class:ai.you", line)], "", ""))
+                out.append(([("class:ai.you", "▸ " if k == 0 else "  ")] + marked_refs(line, "class:ai.you"), "", ""))
             out += [(frags, "", "") for frags in answer_lines(turn.answer, width)]
             if turn.error:
                 out.append((f"  {turn.error}", "class:error", ""))
@@ -1970,21 +2009,37 @@ class App:
         self.app.invalidate()
 
     def _ai_prompt(self) -> None:
+        self._ai_anyway = True  # asked for: show the chat, whatever key the SDK finds
         if self._session.chat.busy:
             self.say("still answering: Ctrl-C in the AI tab stops it", error=True)
             return
-        self._ask_for("ask AI:", "", lambda q: None if q.strip() else "type a question first", self._ai_send)
+        self._ask_for(AI_PROMPT, "", self._ai_check, self._ai_send)
+
+    def _ai_check(self, question: str) -> str | None:
+        """Why the question cannot go yet: empty, or it names a cell that is not there."""
+        if not question.strip():
+            return "type a question first"
+        n = len(self._editable(self._session))
+        missing = [k for k in cell_refs(question) if k >= n]
+        if missing:
+            return f"no cell #c{missing[0]}: the cells are #c0 … #c{n - 1}"
+        return None
+
+    def _cell_outcome(self, cell: Cell) -> str:
+        """A cell's last run for the AI: its result title and any error (never its rows)."""
+        if not cell.has_run:
+            return ""
+        errors = "".join(t for st, t in cell.output if st == "class:error")
+        return "\n".join(x for x in (cell.result_title, errors) if x)
 
     def _ai_send(self, question: str) -> None:
         s = self._session
         cell = self._target_cell()
-        outcome = ""
-        if cell.has_run:
-            errors = "".join(t for st, t in cell.output if st == "class:error")
-            outcome = "\n".join(x for x in (cell.result_title, errors) if x)
         system = system_prompt(s.profile.type, s.columns, s.relations)
-        content = user_message(question, cell.buffer.text if cell.buffer else "", outcome)
-        turn = Turn(question)
+        cells = self._editable(s)
+        named = [(k, cells[k].buffer.text, self._cell_outcome(cells[k])) for k in cell_refs(question) if k < len(cells)]
+        content = user_message(question, cell.buffer.text if cell.buffer else "", self._cell_outcome(cell), cells=named)
+        turn = Turn(question, sent=content)
         s.chat.turns.append(turn)
         s.chat.busy = True
 
@@ -2001,6 +2056,8 @@ class App:
                 turn.error = error_message(e)
             finally:
                 turn.done, s.chat.busy, self._ai_task = True, False, None
+                s.chat.trim()  # the latest KEEP_TURNS only, the history rebuilt from them
+                self._save_chat(s)
                 self._ai_follow()
         self._ai_task = self.app.create_background_task(go())
         self._ai_follow()
@@ -2032,8 +2089,15 @@ class App:
             self.say("still answering: Ctrl-C stops it first", error=True)
             return
         self._session.chat = Chat()
+        self._save_chat(self._session)
         self.panel.tab.cursor = 0
         self.say("new AI chat")
+
+    def _save_chat(self, s: Session) -> None:
+        try:
+            save_chat(s.folder, s.chat.to_json())
+        except OSError as e:
+            self.say(f"AI chat not saved: {e}", error=True)
 
     def _ai_stop(self) -> None:
         if self._ai_task is not None:
@@ -2655,7 +2719,7 @@ class App:
                      ("class:top.mode" if on else "class:top.off", "on" if on else "off", clicked(self.toggle_autotrace)),
                      ("class:top.dim", " F8")]
         left += [sep, ("class:top.dim", f"{s.profile.type} · {s.profile.target()}")]
-        right = " Ctrl-P commands · Ctrl-O run · Ctrl-N new cell · Ctrl-0~2 / Ctrl-W 0~3 conn · F4 statement · Ctrl-C cancel · ↑↓ cells · Alt-1~6 panel · Alt-9 result · Alt-0 prompt · Ctrl-W hjkl move · F1 save+quit · Ctrl-Q quit "
+        right = " Ctrl-P commands · Ctrl-O run · Ctrl-N new cell · Ctrl-0~2 / Ctrl-W 0~3 conn · F4 statement · Ctrl-C cancel · ↑↓ cells · Alt-1~6 panel tab · Alt-8 prompt · Alt-9 panel · Alt-0 result · Ctrl-W hjkl move · F1 save+quit · Ctrl-Q quit "
         used = sum(get_cwidth(f[1]) for f in left)
         room = get_app().output.get_size().columns - used - get_cwidth(right)
         return left + ([("", " " * room), ("class:top.dim", right)] if room > 0 else [])
@@ -2713,6 +2777,9 @@ class App:
                 self.panel.select(i)
                 editing = self._tpl_edit is not None and self.panel.tab.name == "template"
                 event.app.layout.focus(self.editor_window if editing else self.panel.window)
+                if self.panel.tab.name == "ai" and self._ask is None and not self._session.chat.busy \
+                        and not self._ai_picking():
+                    self._ai_prompt()  # the AI tab: straight to the question line
 
         # PageUp / PageDown always scroll the panel, wherever the focus is
         @kb.add("pageup")
@@ -2743,11 +2810,17 @@ class App:
             self.toggle_autotrace()
 
         @kb.add(RESULTS_KEY)
-        def _(event):  # Alt+9: the result pane
+        def _(event):  # Alt+0: the result pane
             event.app.layout.focus(self.results.window)
 
+        @kb.add(PANEL_KEY)
+        def _(event):  # Alt+9: the side panel, on the tab it shows (the template editor if open)
+            self.show_panel = True
+            editing = self._tpl_edit is not None and self.panel.tab.name == "template"
+            event.app.layout.focus(self.editor_window if editing else self.panel.window)
+
         @kb.add(PROMPT_KEY)
-        def _(event):  # Alt+0: back to the prompt (the input cell) from any pane or earlier cell
+        def _(event):  # Alt+8: back to the prompt (the input cell) from any pane or earlier cell
             self._focus_cell(self._session.input_cell, at_end=True)
             if self.vi:
                 event.app.vi_state.input_mode = InputMode.INSERT
@@ -2966,6 +3039,10 @@ class App:
                 buf.complete_next()
                 return
             self.new_cell_below(self._focused_cell())
+
+        @kb.add("O", filter=in_shell & vi_navigation_mode)
+        def _(event):  # NORMAL Shift+O: run only the line under the cursor (vim's "open line above" gives way)
+            self.run_line(self._focused_cell())
 
         @kb.add("f4", filter=in_shell)
         def _(event):  # the complete statement under the cursor, on a connection of its own
@@ -3207,6 +3284,21 @@ class App:
         if not prepare_statement(stmt.text, s.profile.type):
             return
         self.app.create_background_task(self._run_statement(s, source, stmt.text, buf.text))
+
+    def run_line(self, source: Cell) -> None:
+        """NORMAL `O` (Shift+O): only the line under the cursor, in place, like F4 for a
+        statement: `select …;` on a line of its own runs alone, without the lines around it."""
+        s, buf = source.session, source.buffer
+        if source.running:
+            self.say("the cell is still running", error=True)
+            return
+        line = buf.document.current_line.strip()
+        if not line:
+            self.say("O: the line under the cursor is empty", error=True)
+            return
+        if not prepare_statement(line, s.profile.type):
+            return
+        self.app.create_background_task(self._run_statement(s, source, line, buf.text))
 
     async def _run_statement(self, s: Session, cell: Cell, stmt: str, whole: str) -> None:
         await self.run_cell(s, cell, stmt)

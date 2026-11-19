@@ -4,6 +4,7 @@
     last.json   the last run: its text, shell output, result rows and autotrace
     schema.json the schema tab where it was left (kinds, objects, an object's details and DDL)
                 and the catalog Ctrl-O collected, so both outlive the terminal
+    ai.json     the AI tab's latest questions and answers (10), so the chat outlives the terminal
     snapshot.json  F1's snapshot of the whole session (shell cells, prompt and cursor, the
                 result's fetched rows and place), brought back once by the next start
 
@@ -178,3 +179,16 @@ def load_schema(folder: Path) -> dict | None:
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def save_chat(folder: Path, turns: list[dict]) -> None:
+    """The AI tab's questions and answers (the caller keeps only the latest ones)."""
+    _write_json(folder / "ai.json", {"turns": turns, "saved_at": dt.datetime.now().isoformat(timespec="seconds")})
+
+
+def load_chat(folder: Path) -> list:
+    try:
+        data = json.loads((folder / "ai.json").read_text())
+    except (OSError, ValueError):
+        return []
+    return data.get("turns") or [] if isinstance(data, dict) else []

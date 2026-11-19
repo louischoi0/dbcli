@@ -165,8 +165,9 @@ After a run it returns to INSERT mode, ready for the next query.
 
 | Key | Does |
 |---|---|
-| `Alt-0` | The prompt (the input cell), from any pane, in INSERT mode |
-| `Alt-9` | The result pane |
+| `Alt-8` | The prompt (the input cell), from any pane, in INSERT mode |
+| `Alt-9` | The side panel, on the tab it shows (shown again if Ctrl-B hid it) |
+| `Alt-0` | The result pane |
 | `Alt-1` … `Alt-6` | Opens the panel on History / Schema / Trace / Monitor / Template / AI |
 | `Ctrl-W h` / `j` / `k` / `l` | The pane to the left / below / above / right |
 | `Ctrl-W` + arrow, `Ctrl-W Ctrl-H/J/K/L` | The same |
@@ -222,6 +223,7 @@ A command does exactly what its key does, where that key works: a cell command (
 | `F8`, or click `autotrace` in the top bar | Autotrace on / off (Oracle). While on, every run opens the Trace tab. |
 | `Ctrl-B` | Hides / shows the panel |
 | `Ctrl-Q` | Quits |
+| `O` (Shift+O, NORMAL) | Runs only **the line the cursor is on**, in place, like `F4` (the cell's result becomes that line's, no cell is added). With `select 1 from dual;` / `union all` / `select 2 from dual;` on three lines and the cursor on the first, only the first `select` runs. An empty line says so. vim's "open a line above" is replaced (`k` then `o` does the same) |
 | `F4` | Runs only the complete statement under the cursor, in place: the cell's result becomes that statement's, and no cell is added. In a cell of several statements it takes the one the cursor is in, ended by `;` (a PL/SQL block counts whole); a cell of one statement needs no `;`. It runs on the cell's connection: cells on different connections run at the same time, cells on one connection one after another. Any statement: queries, DML, DDL, PL/SQL |
 | `Ctrl-0` `Ctrl-1` `Ctrl-2`, `Ctrl-W` `0`…`3` | Puts the cell on connection conn0 … conn3 (section 6, "Connections"). Terminals send Ctrl-3 as Esc, so conn3 is `Ctrl-W 3` (works for all four) |
 | `F1` | Saves a snapshot of the session and quits: every shell cell with its result, the prompt's text and cursor, each result's fetched rows (all pages so far, column widths and sort), the focus and the result pane's place. The next `./dbcli` brings it back once; a large result's unfetched rest needs a re-run, as its cursor does not survive |
@@ -404,8 +406,8 @@ It is **on from the start**; **F8** (or a click on `autotrace` in the top bar) t
 ```
 
 - **Estimated plan:** EXPLAIN PLAN + DBMS_XPLAN.DISPLAY, with `rows · cost`.
-- **Actual plan:** DBMS_XPLAN.DISPLAY_CURSOR `ALLSTATS LAST` with `estimated` (estimated rows), `actual` (actual rows), buffers and time. The traced statement alone runs with `statistics_level = all`, so no `gather_plan_statistics` hint is needed. An actual row count 10 times or more off the estimate is highlighted.
-- **Statistics:** the session's V$MYSTAT counters over the statement, as SQL*Plus autotrace lists them; zeros are dimmed, consistent gets, physical reads, db block gets and redo size stand out.
+- **Actual plan:** DBMS_XPLAN.DISPLAY_CURSOR `ALLSTATS LAST` with `estimated` (estimated rows) and `actual` (actual rows, its label in bold orange), then buffers and time. The traced statement alone runs with `statistics_level = all`, so no `gather_plan_statistics` hint is needed. An actual row count 10 times or more off the estimate is highlighted.
+- **Statistics:** the session's V$MYSTAT counters over the statement, as SQL*Plus autotrace lists them; zeros are dimmed; **recursive calls, consistent gets and rows processed** stand out, the name in bold ivory and the value in bold orange (zeros too), physical reads, db block gets and redo size stand out in blue.
 - Operations are drawn as a tree (`├─ └─ │`), `*` marks a step with a predicate, and each kind of operation has its own color:
 
 | Operation | Color |
@@ -509,13 +511,15 @@ Each record in the shell is an editable **cell** (like a notebook). The bottom c
 
 | Key | Does |
 |---|---|
-| `Enter` / `a` | Asks: type the question under the panel, Enter sends it (Esc drops it) |
+| `Enter` / `a` | Asks: type the question after the orange `prompt>` under the panel, Enter sends it (Esc drops it). `Alt-6` opens the tab with this line already open |
 | `i` | Puts the last answer's last SQL block at the cursor of the input area (on a new line); `u` undoes |
 | `y` | Copies the last answer |
-| `c` | A new chat (the model forgets the earlier questions) |
+| `c` | A new chat (the model forgets the earlier questions; the saved chat is emptied too) |
 | `Ctrl-C` | Stops the answer being written |
 
-- **What goes with each question:** the database type, the catalog `Ctrl-O` collected in the Schema tab (table and column names), the SQL of the cell you were in (or edited last) and its last outcome (the result title, an error). **Result rows are never sent.** The questions of the chat go along too, so "and sorted by name?" works.
+- **Naming cells:** `@c0`, `@c1` … in a question (the numbers of the `#c0` prompts) show in bold blue as you type, and send **that cell's SQL** and its last outcome along: `why does @c1 fail?`, `join @c0 and @c2`. A number with no cell is refused before anything is sent. `a@c1` (inside a word) is not a reference.
+- **What goes with each question:** the database type, the catalog `Ctrl-O` collected in the Schema tab (table and column names), and the SQL and last outcome (the result title, an error) of the cells the question names, or, naming none, of the cell you were in (or edited last). **Result rows are never sent.** The questions of the chat go along too, so "and sorted by name?" works.
+- **The chat is kept** per connection in `.dbclidata/sessions/<connection>/ai.json`: the next `./dbcli` brings it back. Only the **latest 10** questions and answers are kept (on disk and in what goes to the model); older ones drop off as new ones come. A stopped or failed answer is shown but not sent again. Earlier answers go back to the model as their text only (without its thinking), which keeps the history valid however it was trimmed or restored.
 - The model is Claude Opus 5.5 (`claude-opus-5-5`) at effort `medium`; a question the model declines is re-run on Anthropic's fallback model, and if that declines too the tab says so. `[ai]` in the config changes them (section 7).
 - The key: the active subscription's (`./dbcli subscription add`, section 2), else `[ai] api_key`, else `ANTHROPIC_API_KEY`. **With none of these** the tab lists the saved subscriptions: Enter on one makes it the active one (saved as `[ai] subscription`). With no subscription at all it says to run `./dbcli subscription add` in a terminal; a subscription added or picked there shows in the tab without a restart. `a` still asks, for an `ant auth login` profile. It needs the Anthropic SDK: `.venv/bin/pip install -r requirements.txt` (or `.venv/bin/pip install anthropic`); without it the tab says so and the rest of dbcli works as before.
 - Each question is billed to that key. The catalog is sent as a cached prefix, so repeated questions with the same catalog cost less.
@@ -589,6 +593,7 @@ password = "tiger"
 | `.dbclidata/sessions/<connection>/history` | That connection's queries (the History tab) |
 | `.dbclidata/sessions/<connection>/snapshot.json` | F1's snapshot, read by the next start and then moved to `snapshot.prev.json` |
 | `.dbclidata/sessions/<connection>/schema.json` | The Schema tab where it was left (kinds, a kind's objects, an object's details and DDL) and the catalog Ctrl-O collected, so both are back after a restart |
+| `.dbclidata/sessions/<connection>/ai.json` | The AI tab's latest 10 questions and answers (with the context each one sent), brought back by the next start |
 | `.dbclidata/sessions/<connection>/last.json` | That connection's last run: its text, outcome, result rows (up to 1000) and trace |
 | `.dbclidata/templates.json` | The templates (id, alias, body), edited in the Template tab; made from `[templates]` on first start |
 | `.dbclidata/words.db` | Word use counts for the gray suggestions, shared by all connections; saved on every run |
