@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Start dbcli. Connections and their passwords are read from .dbclidata/config.toml
+# next to this file; the connection added last is opened by default.
+set -euo pipefail
+here="$(dirname "$(readlink -f "$0")")"
+export PYTHONPATH="$here/src${PYTHONPATH:+:$PYTHONPATH}"
+exec "$here/.venv/bin/python" -m dbcli "$@"

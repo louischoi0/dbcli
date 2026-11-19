@@ -1,0 +1,4 @@
+prompt_toolkit>=3.0.43
+oracledb>=2.0
+psycopg[binary]>=3.1
+sqlparse>=0.5

@@ -1,0 +1,38 @@
+# Copy to .dbclidata/config.toml (next to ./dbcli), then `chmod 600` it.   (see MANUAL.md, section 7)
+# Add new connections at the bottom: the last [connections.*] is the default one at startup.
+
+[ui]
+panel = "history"         # first panel tab: history | schema | trace | monitor
+show_panel = true
+editing_mode = "vi"       # input area keys: vi (default) | emacs
+
+[templates]               # `@a 4` -> select * from t where num <= 4
+a = "select * from t where num <= $1"
+range = """
+select *
+from t
+where num between $1 and $2"""
+
+[abbreviations]           # `$a` + Tab -> "select * from "  (these extend the built-in ones)
+a = "select * from "
+s = "select "
+cnt = "select count(*) from "
+
+[connections.local]
+type = "sqlite"
+path = "~/data/local.db"
+
+[connections.dev-pg]
+type = "postgres"
+host = "localhost"
+port = 5432
+dbname = "shop"
+user = "app"
+password = "app-password"          # stored here; `password_env = "VAR"` reads it from the environment instead
+
+[connections.prod-ora]
+type = "oracle"
+user = "scott"
+dsn = "localhost:1521/FREEPDB1"
+password = "tiger"
+# autocommit = false              # Oracle default: run `commit;` yourself
