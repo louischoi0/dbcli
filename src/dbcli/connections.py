@@ -30,13 +30,13 @@ class ConnectionError_(Exception):
 
 
 # -- the file as blocks ------------------------------------------------------------------
-def _connection_of(header: str) -> str | None:
+def _connection_of(header: str, table: str = "connections") -> str | None:
     """`connections.name` (or `connections."name"`) -> name; None for any other table."""
-    m = re.fullmatch(r'connections\s*\.\s*(?:"([^"]+)"|([A-Za-z0-9_-]+))', header)
+    m = re.fullmatch(rf'{table}\s*\.\s*(?:"([^"]+)"|([A-Za-z0-9_-]+))', header)
     return (m.group(1) or m.group(2)) if m else None
 
 
-def split_blocks(text: str) -> list[tuple[str | None, list[str]]]:
+def split_blocks(text: str, table: str = "connections") -> list[tuple[str | None, list[str]]]:
     """The file as (connection name or None, lines) pieces, in order: a connection's piece runs
     from its header to the next table header. Comment lines right above a header go with that
     header (they describe it) when a blank line sets them off from what is above; a comment
@@ -54,7 +54,7 @@ def split_blocks(text: str) -> list[tuple[str | None, list[str]]]:
             lead = []
             if k < len(prev) and k > 0 and not prev[k - 1].strip():
                 lead, prev[k:] = prev[k:], []
-            pieces.append((_connection_of(m.group(1)), lead + [line]))
+            pieces.append((_connection_of(m.group(1), table), lead + [line]))
         else:
             pieces[-1][1].append(line)
     return [(n, ls) for n, ls in pieces if ls or n is not None]

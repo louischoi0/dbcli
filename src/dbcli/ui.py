@@ -56,7 +56,8 @@ from prompt_toolkit.utils import get_cwidth
 
 from .abbrev import Abbreviations
 from .ai import Assistant, Chat, Turn, error_message, last_sql, system_prompt, user_message
-from .config import DATA_DIR, PANEL_TABS, AISettings, Profile, UISettings
+from .subscription import activate as subscription_activate, mask as mask_key
+from .config import DATA_DIR, PANEL_TABS, AISettings, Profile, UISettings, load as load_config
 from .store import (history_stamp, history_view, load_history, load_last, load_schema, save_last, save_schema,
                     save_snapshot,
                     session_dir, take_snapshot)
@@ -141,6 +142,7 @@ STYLE = Style.from_dict({
     "relation missing": "#ff6b6b bold underline",  # a missing table stays bold, as relation names are  # what a hint names in its parentheses: aliases, indexes, @query blocks
     "prompt": f"{SKY} bold",
     "prompt.dim": FAINT,
+    "prompt.num": DIM,  # `#c0`: the cell's number from the top
     "prompt.stale": f"{STALE} bold",
     "prompt.running": "#ffd75f bold",
     # each connection's label on a cell, its own color: conn0 orange, conn1 green, conn2 sand, conn3 rose
@@ -1023,18 +1025,21 @@ class Cell:
         return "class:input class:cell.focused" if self.focused() and not self.is_input else "class:input"
 
     def _prefix(self, lineno: int, wrap_count: int):
-        """`conn0> ` on the first line (a spinner for `>` while it runs), `_ ` under it on the last."""
+        """`#c0 conn0> ` on the first line (the cell's number from the top, a spinner for `>`
+        while it runs), `_ ` under it on the last."""
         style = "class:prompt.stale" if self.stale else "class:prompt" if self.focused() else "class:prompt.dim"
+        cells = self.app._editable(self.session)
+        tag = f"#c{cells.index(self) if self in cells else 0} "
         label = f"conn{self.conn_index}"
-        pad = " " * len(label)
+        pad = " " * (len(tag) + len(label))
         if wrap_count:  # a long line carried onto the next row
             return [(style, pad + CONTINUATION)]
         if lineno == 0:
-            head = (f"{style} class:prompt.conn{self.conn_index}", label)
+            head = [("class:prompt.num", tag), (f"{style} class:prompt.conn{self.conn_index}", label)]
             if self.running:  # still running: a spinner where ">" goes
                 frame = SPINNER[int(time.monotonic() / SPIN_INTERVAL) % len(SPINNER)]
-                return [head, ("class:prompt.running", frame + " ")]
-            return [head, (style, PROMPT)]
+                return head + [("class:prompt.running", frame + " ")]
+            return head + [(style, PROMPT)]
         last = self.buffer.document.line_count - 1
         return [(style, pad + (BLOCK_END if lineno == last else CONTINUATION))]
 
@@ -1144,7 +1149,9 @@ class App:
     def __init__(self, profiles: list[Profile], abbrevs: Abbreviations, ui: UISettings,
                  templates: Templates, ai: AISettings | None = None):
         DATA_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)  # also holds passwords
-        self.assistant = Assistant(ai or AISettings())
+        self.ai_settings = ai or AISettings()  # as read, subscriptions included
+        self._ai_mtime = self._config_mtime()
+        self.assistant = Assistant(self.ai_settings.effective())
         self._ai_task = None  # the question being answered (Ctrl-C in the AI tab stops it)
         self.profiles = profiles
         self.abbrevs = abbrevs
@@ -1179,7 +1186,7 @@ class App:
                                  keys={"a": self._template_add, "e": self._template_edit_current,
                                        "r": self._template_rename, "d": self._template_delete,
                                        "i": self._template_insert, "y": self._template_copy}),
-            "ai": PanelTab("ai", "AI", self._ai_items, lambda i: self._ai_prompt(),
+            "ai": PanelTab("ai", "AI", self._ai_items, self._ai_pick,
                            keys={"a": self._ai_prompt, "i": self._ai_insert, "y": self._ai_copy,
                                  "c": self._ai_clear, "c-c": self._ai_stop}),
         }
@@ -1865,7 +1872,75 @@ class App:
             self.say(f"not an editor command: :{cmd} (w, wq, x, q, q!)", error=True)
 
     # -- AI: questions about SQL to Claude, with this session's context ---------------------
+    # no key yet: the subscriptions to pick from, or how to add one
+    AI_PICK_HEAD = 3  # rows above the first subscription in the picker
+
+    def _config_mtime(self) -> float | None:
+        try:
+            return self.ai_settings.config_path.stat().st_mtime if self.ai_settings.config_path else None
+        except OSError:
+            return None
+
+    def _ai_reload(self) -> None:
+        """Take in a subscription added or picked meanwhile (`./dbcli subscription …`)."""
+        mtime = self._config_mtime()
+        if mtime == self._ai_mtime or self.ai_settings.config_path is None:
+            return
+        self._ai_mtime = mtime
+        try:
+            self.ai_settings = load_config(self.ai_settings.config_path).ai
+        except Exception:  # a half-edited file: keep what was read before
+            return
+        self.assistant = Assistant(self.ai_settings.effective())
+
+    def _ai_picking(self) -> bool:
+        return not self.ai_settings.has_key() and not self._session.chat.turns
+
+    def _ai_picker_items(self):
+        ai = self.ai_settings
+        head = [([("class:schema.title", "AI"), ("class:list.note", "  no subscription is active")], "", "")]
+        if not ai.subscriptions:
+            return head + [(t, style, "") for t, style in (
+                ("", ""),
+                ("Add an Anthropic API key first, in a terminal:", "class:list.note"),
+                ("  ./dbcli subscription add", "class:ai.you"),
+                ("It asks for a name and the key (not shown).", "class:list.note"),
+                ("This tab picks it up by itself.", "class:list.note"),
+                ("", ""),
+                ("(ANTHROPIC_API_KEY or an `ant auth login`", "class:list.note"),
+                ("profile work too: a asks anyway)", "class:list.note"))]
+        rows = head + [("Pick one: Enter uses it (saved as [ai] subscription)", "class:list.note", ""), ("", "", "")]
+        for name, sub in ai.subscriptions.items():
+            extra = " · ".join(x for x in (sub.model, sub.effort) if x)
+            rows.append(([("class:ai.you", name), ("class:list.note", f"  {mask_key(sub.api_key)}")], "", extra))
+        if ai.subscription:
+            rows.append((f"([ai] subscription = {ai.subscription!r} is not defined)", "class:error", ""))
+        return rows
+
+    def _ai_pick(self, i: int) -> None:
+        """Enter in the AI tab: use the subscription under the cursor (picker), else ask."""
+        if not self._ai_picking():
+            self._ai_prompt()
+            return
+        names = list(self.ai_settings.subscriptions)
+        k = i - self.AI_PICK_HEAD
+        if not 0 <= k < len(names):
+            if not names:
+                self.say("no subscription yet: ./dbcli subscription add (in a terminal)", error=True)
+            return
+        try:
+            subscription_activate(self.ai_settings.config_path, names[k])
+        except Exception as e:  # the file could not be changed: say why
+            self.say(f"could not save it: {e}", error=True)
+            return
+        self._ai_reload()
+        self.panel.tab.cursor = 0
+        self.say(f"AI uses subscription {names[k]} now")
+
     def _ai_items(self):
+        self._ai_reload()
+        if self._ai_picking():
+            return self._ai_picker_items()
         chat, width = self._session.chat, max(20, self.panel.width() - 4)
         st = self.assistant.settings
         head = [([("class:schema.title", "AI"), ("class:list.note", f"  {st.model} · Enter ask · i insert SQL · y copy · c new chat · Ctrl-C stop")],

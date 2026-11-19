@@ -132,7 +132,7 @@ def error_message(e: BaseException) -> str:
     except ModuleNotFoundError:
         return str(e)
     if isinstance(e, anthropic.AuthenticationError):
-        return "no valid API key: set ANTHROPIC_API_KEY, run `ant auth login`, or [ai] api_key in config.toml"
+        return "the key was refused: ./dbcli subscription add (a new key) or set (another one)"
     if isinstance(e, anthropic.PermissionDeniedError):
         return "this API key may not use that model"
     if isinstance(e, anthropic.NotFoundError):

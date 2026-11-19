@@ -1,5 +1,6 @@
 """Usage: ./dbcli [--config FILE] [--list] [CONNECTION | SQLITE-FILE]
        ./dbcli connection list | add [NAME] | delete NAME | set NAME
+       ./dbcli subscription list | add [NAME] | set [NAME] | delete NAME | show | unset
 
 One terminal runs one connection. Connections, passwords included, come from
 .dbclidata/config.toml (see config.example.toml); with no argument the one added last
@@ -30,6 +31,9 @@ def main() -> None:
     if sys.argv[1:2] in (["connection"], ["connections"], ["conn"]):  # manage config.toml's connections
         from .connections import main as connection_main
         sys.exit(connection_main(sys.argv[2:]))
+    if sys.argv[1:2] in (["subscription"], ["sub"]):  # the AI tab's API key, model and effort
+        from .subscription import main as subscription_main
+        sys.exit(subscription_main(sys.argv[2:]))
     ap = argparse.ArgumentParser(prog="dbcli", description="One terminal, one connection.")
     ap.add_argument("--config", type=Path, default=CONFIG_PATH)
     ap.add_argument("--list", action="store_true", help="list the connections and exit")

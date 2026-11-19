@@ -40,6 +40,23 @@ python3 -m venv .venv
 - **`set NAME`** moves the connection's block to the end of the file, which makes it the default. **`delete NAME`** removes the block, password included.
 - `config.toml` is edited as text: comments and the other sections stay as written (a comment just above a connection, set off by a blank line, moves and goes with it). Each change is checked to parse before it is saved; the file stays owner-only (`0600`). `--config FILE` (after `connection`) works on another file. `connections` and `conn` work as `connection`.
 
+### The AI tab's keys (subscriptions)
+
+```bash
+./dbcli subscription add work                 # a name and its Anthropic API key (asked, not shown)
+./dbcli subscription add home --model claude-sonnet-5-5 --effort low
+./dbcli subscription list                     # * marks the active one
+./dbcli subscription set home                 # make it the active one (no name: asks which)
+./dbcli subscription show [--check]           # the active key masked (sk-ant-…abcd), model, effort; --check asks the API
+./dbcli subscription delete home              # asks first; -y does not
+./dbcli subscription unset                    # none active (the subscriptions are kept)
+```
+
+- Each subscription is a `[subscriptions.NAME]` block in `config.toml` with its `api_key` and, if given, its own `model` and `effort` (else `[ai]`'s); `[ai] subscription = "NAME"` says which one the AI tab uses. The first one added becomes the active one; `add --use` makes a later one active.
+- `set` with no name lists them and asks which (with none yet it adds the first). After `add` it asks the API about the model with the key (`models.retrieve`, nothing billed); `--no-check` skips that, and it needs the Anthropic SDK (6.4).
+- Like `connection`, the file is edited as text, checked to parse, and stays `0600`. A key is never printed in full. `sub` works as `subscription`.
+- Without an active subscription, `[ai] api_key` (older configs) or `ANTHROPIC_API_KEY` is used; failing those, the AI tab shows the subscriptions to pick from (6.4).
+
 - With no argument the **connection added last** (lowest in the config file) opens. With no connections at all, an in-memory SQLite database (`memory`) opens.
 - Connection details and passwords are all in `.dbclidata/config.toml`, so `./dbcli` needs no environment variables or other setup (section 7).
 - A name that is neither a connection nor looks like a file is refused, with the list of connections.
@@ -455,7 +472,7 @@ The user needs SELECT on `v_$session`, `v_$locked_object`, `v_$sql` and `v_$syst
 
 Each record in the shell is an editable **cell** (like a notebook). The bottom cell is the new input.
 
-**Connections.** A session holds up to four connections, `conn0` … `conn3`, and each cell runs on one of them, named in its prompt (`conn0> `, each in its own color). A new cell is on conn0; `Ctrl-0` … `Ctrl-3` in a cell move it to another (conn1-3 connect when first used, with the session's autocommit). Cells on different connections run at the same time; cells on one connection wait their turn, in the order started (`waiting for conn1…`), as one connection runs one statement at a time. Each connection is its own database session, so its own transaction: a `commit` commits only its connection's changes. conn0 also serves the schema browser, the monitor and completion. `F7` sets autocommit on all of them. A running cell shows a spinner where `>` goes; `Ctrl-C` on it cancels it.
+**Connections.** A session holds up to four connections, `conn0` … `conn3`, and each cell runs on one of them, named in its prompt (`#c0 conn0> `: the cell's number from the top, then the connection in its own color). A new cell is on conn0; `Ctrl-0` … `Ctrl-3` in a cell move it to another (conn1-3 connect when first used, with the session's autocommit). Cells on different connections run at the same time; cells on one connection wait their turn, in the order started (`waiting for conn1…`), as one connection runs one statement at a time. Each connection is its own database session, so its own transaction: a `commit` commits only its connection's changes. conn0 also serves the schema browser, the monitor and completion. `F7` sets autocommit on all of them. A running cell shows a spinner where `>` goes; `Ctrl-C` on it cancels it.
 
 ```
  > select * from t where v > 100 or v = 1    ← moved up with ↑ and edited (background and prompt color)
@@ -500,7 +517,7 @@ Each record in the shell is an editable **cell** (like a notebook). The bottom c
 
 - **What goes with each question:** the database type, the catalog `Ctrl-O` collected in the Schema tab (table and column names), the SQL of the cell you were in (or edited last) and its last outcome (the result title, an error). **Result rows are never sent.** The questions of the chat go along too, so "and sorted by name?" works.
 - The model is Claude Opus 5.5 (`claude-opus-5-5`) at effort `medium`; a question the model declines is re-run on Anthropic's fallback model, and if that declines too the tab says so. `[ai]` in the config changes them (section 7).
-- The key: `[ai] api_key` in the config, else `ANTHROPIC_API_KEY`, else an `ant auth login` profile. It needs the Anthropic SDK: `.venv/bin/pip install -r requirements.txt` (or `.venv/bin/pip install anthropic`); without it the tab says so and the rest of dbcli works as before.
+- The key: the active subscription's (`./dbcli subscription add`, section 2), else `[ai] api_key`, else `ANTHROPIC_API_KEY`. **With none of these** the tab lists the saved subscriptions: Enter on one makes it the active one (saved as `[ai] subscription`). With no subscription at all it says to run `./dbcli subscription add` in a terminal; a subscription added or picked there shows in the tab without a restart. `a` still asks, for an `ant auth login` profile. It needs the Anthropic SDK: `.venv/bin/pip install -r requirements.txt` (or `.venv/bin/pip install anthropic`); without it the tab says so and the rest of dbcli works as before.
 - Each question is billed to that key. The catalog is sent as a cached prefix, so repeated questions with the same catalog cost less.
 
 ## 7. Config file
@@ -517,7 +534,11 @@ editing_mode = "vi"             # input area keys: vi (default) | emacs
 [ai]                            # the AI tab (6.4); all optional
 model = "claude-opus-5-5"
 effort = "medium"               # low | medium | high | xhigh | max
-# api_key = "sk-ant-…"          # else ANTHROPIC_API_KEY or an `ant auth login` profile
+# subscription = "work"         # the active [subscriptions.*] (./dbcli subscription set)
+
+[subscriptions.work]            # ./dbcli subscription add writes these
+api_key = "sk-ant-…"
+# model = "claude-sonnet-5-5"   # this key's own model / effort, else [ai]'s
 
 [templates]                     # called as @name args… (5.4); fills templates.json once
 a = "select * from t where num <= $1"
@@ -589,6 +610,7 @@ The source is in `src/dbcli/`; `./dbcli` at the repository root runs it with the
 | `src/dbcli/words.py` | The weighted word model, gray suggestions, saving what was learned |
 | `src/dbcli/templates.py` | `@name args` SQL templates |
 | `src/dbcli/ai.py` | The AI tab: what is sent, the streamed answer, the SQL `i` inserts |
+| `src/dbcli/subscription.py` | `./dbcli subscription list / add / set / delete / show / unset`: the AI tab's keys |
 | `src/dbcli/connections.py` | `./dbcli connection list / add / delete / set` |
 | `src/dbcli/tab.py` | Deciding what Tab does |
 | `src/dbcli/panes.py` | Ctrl-W direction moves |

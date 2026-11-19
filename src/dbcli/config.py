@@ -63,12 +63,43 @@ AI_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 
 @dataclass
+class Subscription:
+    """[subscriptions.NAME]: an Anthropic API key, with its own model / effort if given."""
+    name: str
+    api_key: str
+    model: str | None = None
+    effort: str | None = None
+
+
+@dataclass
 class AISettings:
-    """[ai]: the AI tab's model. The key comes from `api_key` here, else the Anthropic SDK's
-    own lookup (ANTHROPIC_API_KEY, an `ant auth login` profile)."""
+    """[ai]: the AI tab's model, and which subscription it uses (`subscription = "NAME"`).
+    The key is that subscription's, else `api_key` here, else the Anthropic SDK's own lookup
+    (ANTHROPIC_API_KEY, an `ant auth login` profile)."""
     model: str = "claude-opus-5-5"
     effort: str = "medium"  # low | medium | high | xhigh | max
     api_key: str | None = None
+    subscription: str | None = None  # the active one's name
+    subscriptions: dict = field(default_factory=dict)  # name -> Subscription, in file order
+    config_path: Path | None = None  # where they were read, so the client can pick one
+
+    @property
+    def active(self) -> "Subscription | None":
+        return self.subscriptions.get(self.subscription) if self.subscription else None
+
+    def effective(self) -> "AISettings":
+        """These settings with the active subscription's key, model and effort applied."""
+        sub = self.active
+        if sub is None:
+            return self
+        return AISettings(model=sub.model or self.model, effort=sub.effort or self.effort, api_key=sub.api_key,
+                          subscription=self.subscription, subscriptions=self.subscriptions,
+                          config_path=self.config_path)
+
+    def has_key(self) -> bool:
+        """A key dbcli can see: the active subscription's, [ai] api_key or ANTHROPIC_API_KEY.
+        (An `ant auth login` profile may also work, but is not checked here.)"""
+        return bool(self.effective().api_key or os.environ.get("ANTHROPIC_API_KEY"))
 
 
 @dataclass
@@ -108,9 +139,18 @@ def load(path: Path = CONFIG_PATH) -> Config:
         if not isinstance(body, str) or not re.fullmatch(r"[A-Za-z_][\w-]*", name):
             raise ConfigError(f"[templates] {name}: the name takes letters, digits, _ and -, the value is an SQL string")
     ai_data = data.get("ai", {})
+    subs = {}
+    for name, opts in data.get("subscriptions", {}).items():
+        if not isinstance(opts, dict) or not isinstance(opts.get("api_key"), str) or not opts["api_key"]:
+            raise ConfigError(f"[subscriptions.{name}] needs api_key = \"sk-ant-…\"")
+        if opts.get("effort") is not None and opts["effort"] not in AI_EFFORTS:
+            raise ConfigError(f"[subscriptions.{name}] effort must be one of {', '.join(AI_EFFORTS)}")
+        subs[name] = Subscription(name, opts["api_key"], opts.get("model"), opts.get("effort"))
     ai = AISettings(model=str(ai_data.get("model", AISettings.model)),
                     effort=str(ai_data.get("effort", AISettings.effort)),
-                    api_key=ai_data.get("api_key") or None)
+                    api_key=ai_data.get("api_key") or None,
+                    subscription=ai_data.get("subscription") or None,
+                    subscriptions=subs, config_path=path)
     if ai.effort not in AI_EFFORTS:
         raise ConfigError(f"[ai] effort must be one of {', '.join(AI_EFFORTS)}")
     return Config(profiles, {**DEFAULT_ABBREVIATIONS, **data.get("abbreviations", {})}, ui, templates, ai)
