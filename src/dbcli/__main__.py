@@ -1,4 +1,5 @@
 """Usage: ./dbcli [--config FILE] [--list] [CONNECTION | SQLITE-FILE]
+       ./dbcli connection list | add [NAME] | delete NAME | set NAME
 
 One terminal runs one connection. Connections, passwords included, come from
 .dbclidata/config.toml (see config.example.toml); with no argument the one added last
@@ -26,6 +27,9 @@ def use_time_zone(name: str) -> None:
 
 def main() -> None:
     use_time_zone(os.environ.get("DBCLI_TZ", "Asia/Seoul"))
+    if sys.argv[1:2] in (["connection"], ["connections"], ["conn"]):  # manage config.toml's connections
+        from .connections import main as connection_main
+        sys.exit(connection_main(sys.argv[2:]))
     ap = argparse.ArgumentParser(prog="dbcli", description="One terminal, one connection.")
     ap.add_argument("--config", type=Path, default=CONFIG_PATH)
     ap.add_argument("--list", action="store_true", help="list the connections and exit")
@@ -56,7 +60,7 @@ def main() -> None:
     DATA_DIR.mkdir(mode=0o700, exist_ok=True)
     # kept in templates.json (the Template tab edits them); the config's [templates] fill it once
     templates = Templates(cfg.templates, path=DATA_DIR / "templates.json")
-    run([profile], Abbreviations(cfg.abbreviations), cfg.ui, templates)
+    run([profile], Abbreviations(cfg.abbreviations), cfg.ui, templates, cfg.ai)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 # Add new connections at the bottom: the last [connections.*] is the default one at startup.
 
 [ui]
-panel = "history"         # first panel tab: history | schema | trace | monitor
+panel = "history"         # first panel tab: history | schema | trace | monitor | template | ai
 show_panel = true
 editing_mode = "vi"       # input area keys: vi (default) | emacs
 

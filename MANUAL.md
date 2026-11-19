@@ -25,6 +25,21 @@ python3 -m venv .venv
 ./dbcli --config my.toml     # another config file
 ```
 
+### Managing connections
+
+```bash
+./dbcli connection list            # the connections; * marks the default
+./dbcli connection add             # asks for name, type, host, port, service / database, account, password
+./dbcli connection add ora2 --type oracle --host db1 --port 1521 --service ORCL --user scott
+./dbcli connection set prod-ora    # make it the default (./dbcli opens it)
+./dbcli connection delete ora2     # asks first; -y does not
+```
+
+- **`add`** asks for whatever the flags do not give: the connection name, the type (`oracle` by default), then for Oracle the host (`localhost`), port (`1521`), service name, account and password; for PostgreSQL the host, port (`5432`), database, account and password; for SQLite the file. The password is typed without showing and stored in `config.toml` (empty: none). `--password-env VAR` stores `password_env = "VAR"` instead, so the password is read from `$VAR` at connect time. At the end it offers to connect once to check it (`--test` does it, `--no-test` skips the question); a failed test leaves the connection saved.
+- A new connection **becomes the default**, as the last one in the file is; `--keep-default` adds it just above the current default instead.
+- **`set NAME`** moves the connection's block to the end of the file, which makes it the default. **`delete NAME`** removes the block, password included.
+- `config.toml` is edited as text: comments and the other sections stay as written (a comment just above a connection, set off by a blank line, moves and goes with it). Each change is checked to parse before it is saved; the file stays owner-only (`0600`). `--config FILE` (after `connection`) works on another file. `connections` and `conn` work as `connection`.
+
 - With no argument the **connection added last** (lowest in the config file) opens. With no connections at all, an in-memory SQLite database (`memory`) opens.
 - Connection details and passwords are all in `.dbclidata/config.toml`, so `./dbcli` needs no environment variables or other setup (section 7).
 - A name that is neither a connection nor looks like a file is refused, with the list of connections.
@@ -58,7 +73,7 @@ The top bar, the shell on the left, the panel on the right, and the result pane 
 |---|---|
 | Top bar | From the left: vim mode, connection state (●), connection name, online state, the latest message, the **autocommit** and **autotrace** switches with their keys, and the target. A narrow terminal cuts from the right, so the important parts come first. The right end lists the main keys. |
 | Shell | The `> ` input area works **like a text editor**: Enter is a new line and **Ctrl-O** runs. A cell of several lines ends with `_ ` on its last line, so `>` … `_` mark where each block starts and ends. The shell keeps each statement run and a short outcome (`(2 rows)`, `OK, 3 row(s) affected`, errors). |
-| Panel | One panel with the **History / Schema / Trace / Monitor / Template** tabs (`Alt-1` to `Alt-5`). The panel is as wide as a plan needs on every tab (at most 96 columns, half the screen), so switching tabs never moves the shell. The first tab shown is `[ui] panel` (section 7). |
+| Panel | One panel with the **History / Schema / Trace / Monitor / Template / AI** tabs (`Alt-1` to `Alt-6`). The panel is as wide as a plan needs on every tab (at most 96 columns, half the screen), so switching tabs never moves the shell. The first tab shown is `[ui] panel` (section 7). |
 | Result | The latest result as a **boxed table**. Each header cell has the column name on the left and its type on the right (`N` number, `VCH` varchar2, `CH` char, `CL` clob, `BB` blob, `R` raw, `D` date, `T` timestamp, `TZ` timestamp with time zone, `RID` rowid …; Oracle only), the type in a toned-down shade of its values' color. Values are colored by the column's type (numbers green, text yellow, dates lavender, binary teal, booleans orange), numbers right-aligned, NULL dimmed, every other row shaded. Cells are cut at 40 columns with `…`, line breaks show as `↵`. |
 
 Connection state in the top bar:
@@ -78,9 +93,10 @@ Panel tabs:
 | Schema | A schema browser (section 6.2): the kinds of objects with their counts, a kind's objects, then one object's details (columns, indexes, constraints, triggers, arguments, compile errors) and its DDL. |
 | Monitor | Sessions, blocking, locked objects, top SQL and wait events, read when you press Ctrl-O in the tab (section 6.3). |
 | Template | The saved templates (section 5.4), one to a line: id, `@alias` and body. Enter edits a body right in the panel (vi keys, `:wq`); `a` adds, `r` renames, `d` deletes. |
+| AI | Questions about SQL to Claude, answered in the tab (section 6.4). |
 | Trace | With autotrace on (Oracle): the run's **estimated plan** (EXPLAIN PLAN + DBMS_XPLAN), **actual plan** (DISPLAY_CURSOR `ALLSTATS LAST`) and **session statistics**, drawn as a tree (section 6.1). It shows the trace of the cell focused in the shell. |
 
-Colors are soft grays with sky blue: the focused pane's title (the selected tab in the panel), the prompt, table headers and `online` are sky blue; only offline and errors are red. Orange marks `conn0` in a cell's prompt, an `off` switch in the top bar (`autocommit off`, `autotrace off`) and the numbers in the panel (History's run numbers, Template's ids). Ctrl-B hides the panel so the shell takes the full width.
+Colors are soft grays with sky blue: the focused pane's title (the selected tab in the panel), the prompt, table headers and `online` are sky blue; `connected` in the top bar's message is green; only offline and errors are red. Orange marks `conn0` in a cell's prompt, an `off` switch in the top bar (`autocommit off`, `autotrace off`) and the numbers in the panel (History's run numbers, Template's ids). Ctrl-B hides the panel so the shell takes the full width.
 The layout follows the terminal's size. Panes, tabs, list items and the two switches in the top bar can be clicked.
 
 ## 4. Keys
@@ -134,7 +150,7 @@ After a run it returns to INSERT mode, ready for the next query.
 |---|---|
 | `Alt-0` | The prompt (the input cell), from any pane, in INSERT mode |
 | `Alt-9` | The result pane |
-| `Alt-1` … `Alt-5` | Opens the panel on History / Schema / Trace / Monitor / Template |
+| `Alt-1` … `Alt-6` | Opens the panel on History / Schema / Trace / Monitor / Template / AI |
 | `Ctrl-W h` / `j` / `k` / `l` | The pane to the left / below / above / right |
 | `Ctrl-W` + arrow, `Ctrl-W Ctrl-H/J/K/L` | The same |
 | `Ctrl-W w`, `Ctrl-W Ctrl-W` | The next pane |
@@ -162,7 +178,7 @@ Directions follow where the panes are drawn: from the prompt `Ctrl-W l` is the p
 | Key | Does |
 |---|---|
 | `→` / `←`, `l` / `h`, `Tab` / `Shift-Tab` | Next / previous tab (wrapping around) |
-| `1` … `5` | History / Schema / Trace / Monitor / Template |
+| `1` … `6` | History / Schema / Trace / Monitor / Template / AI |
 | `j` / `k`, `↓` / `↑` | Moves the selection |
 | `g` / `G`, `Home` / `End` | Top / bottom |
 | `PageUp` / `PageDown` | Scroll the panel a screen at a time, **wherever the focus is** (the prompt, the result pane, the panel) |
@@ -470,6 +486,23 @@ Each record in the shell is an editable **cell** (like a notebook). The bottom c
 
 > Oracle starts with autocommit off: quitting without a commit rolls changes back.
 
+### 6.4 AI tab
+
+`Alt-6` opens it. Ask about SQL and the answer streams into the tab, SQL highlighted behind a bar.
+
+| Key | Does |
+|---|---|
+| `Enter` / `a` | Asks: type the question under the panel, Enter sends it (Esc drops it) |
+| `i` | Puts the last answer's last SQL block at the cursor of the input area (on a new line); `u` undoes |
+| `y` | Copies the last answer |
+| `c` | A new chat (the model forgets the earlier questions) |
+| `Ctrl-C` | Stops the answer being written |
+
+- **What goes with each question:** the database type, the catalog `Ctrl-O` collected in the Schema tab (table and column names), the SQL of the cell you were in (or edited last) and its last outcome (the result title, an error). **Result rows are never sent.** The questions of the chat go along too, so "and sorted by name?" works.
+- The model is Claude Opus 5.5 (`claude-opus-5-5`) at effort `medium`; a question the model declines is re-run on Anthropic's fallback model, and if that declines too the tab says so. `[ai]` in the config changes them (section 7).
+- The key: `[ai] api_key` in the config, else `ANTHROPIC_API_KEY`, else an `ant auth login` profile. It needs the Anthropic SDK: `.venv/bin/pip install -r requirements.txt` (or `.venv/bin/pip install anthropic`); without it the tab says so and the rest of dbcli works as before.
+- Each question is billed to that key. The catalog is sent as a cached prefix, so repeated questions with the same catalog cost less.
+
 ## 7. Config file
 
 Where: `.dbclidata/config.toml` in the repository (the `.dbclidata/` next to `./dbcli`).
@@ -477,9 +510,14 @@ Example: `config.example.toml` in the repository.
 
 ```toml
 [ui]
-panel = "history"               # first panel tab: history | schema | trace | monitor | template
+panel = "history"               # first panel tab: history | schema | trace | monitor | template | ai
 show_panel = true               # false: start with the panel hidden (Ctrl-B shows it)
 editing_mode = "vi"             # input area keys: vi (default) | emacs
+
+[ai]                            # the AI tab (6.4); all optional
+model = "claude-opus-5-5"
+effort = "medium"               # low | medium | high | xhigh | max
+# api_key = "sk-ant-…"          # else ANTHROPIC_API_KEY or an `ant auth login` profile
 
 [templates]                     # called as @name args… (5.4); fills templates.json once
 a = "select * from t where num <= $1"
@@ -550,6 +588,8 @@ The source is in `src/dbcli/`; `./dbcli` at the repository root runs it with the
 | `src/dbcli/abbrev.py` | Finding and replacing `$abbreviations` |
 | `src/dbcli/words.py` | The weighted word model, gray suggestions, saving what was learned |
 | `src/dbcli/templates.py` | `@name args` SQL templates |
+| `src/dbcli/ai.py` | The AI tab: what is sent, the streamed answer, the SQL `i` inserts |
+| `src/dbcli/connections.py` | `./dbcli connection list / add / delete / set` |
 | `src/dbcli/tab.py` | Deciding what Tab does |
 | `src/dbcli/panes.py` | Ctrl-W direction moves |
 | `src/dbcli/db.py` | Database adapters (run, relation list, ping, autocommit, autotrace), statement cleanup |

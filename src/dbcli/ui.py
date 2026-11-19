@@ -55,7 +55,8 @@ from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
 
 from .abbrev import Abbreviations
-from .config import DATA_DIR, PANEL_TABS, Profile, UISettings
+from .ai import Assistant, Chat, Turn, error_message, last_sql, system_prompt, user_message
+from .config import DATA_DIR, PANEL_TABS, AISettings, Profile, UISettings
 from .store import (history_stamp, history_view, load_history, load_last, load_schema, save_last, save_schema,
                     save_snapshot,
                     session_dir, take_snapshot)
@@ -106,7 +107,7 @@ ANSI_SEQUENCES["\x1b[27;2;9~"] = Keys.BackTab
 # Alt+Enter and Alt+1/2/3/4 arrive as ESC+key in one burst. Parsing them as single keys
 # here (instead of ("escape", key) bindings) keeps a lone Esc instant in vim mode.
 ALT_ENTER = Keys.ControlF23
-ALT_DIGITS = [Keys.ControlF20, Keys.ControlF21, Keys.ControlF22, Keys.ControlF19, Keys.ControlF12]
+ALT_DIGITS = [Keys.ControlF20, Keys.ControlF21, Keys.ControlF22, Keys.ControlF19, Keys.ControlF12, Keys.ControlF11]
 ANSI_SEQUENCES["\x1b\r"] = ALT_ENTER
 for _i, _key in enumerate(ALT_DIGITS):
     ANSI_SEQUENCES[f"\x1b{_i + 1}"] = _key
@@ -168,6 +169,10 @@ STYLE = Style.from_dict({
     "list.note": DIM,
     "list.id": ORANGE,  # a row's number in the panel: History's run numbers, Template's ids
     "list.empty": f"{DIM} italic",
+    # the AI tab
+    "ai.you": f"{SKY} bold",  # a question
+    "ai.text": "#d0d0d0",  # an answer's prose
+    "ai.code": FAINT,  # the bar in front of an answer's SQL
     # schema browser
     "schema.kind": f"{LIGHT} bold",
     "schema.title": f"{SKY} bold",
@@ -179,6 +184,7 @@ STYLE = Style.from_dict({
     "top.name": f"{LIGHT} bold",
     "top.sep": FAINT,
     "top.online": SKY,
+    "top.connected": "#a6d189 bold",  # the `connected` of "<name> connected": green, as numbers are
     "top.offline": ERROR,
     "top.wait": DIM,
     "top.dim": DIM,
@@ -547,6 +553,44 @@ class ScrollingControl(FormattedTextControl):
         self._move(-1)
 
 
+def wrap_text(text: str, width: int) -> list[str]:
+    """Prose cut to `width` columns at spaces (a long word is cut where it must); blank lines kept."""
+    out: list[str] = []
+    for para in text.split("\n"):
+        line = ""
+        for word in para.split(" "):
+            while get_cwidth(word) > width:
+                if line:
+                    out.append(line)
+                    line = ""
+                out.append(word[:width])
+                word = word[width:]
+            if line and get_cwidth(line) + 1 + get_cwidth(word) > width:
+                out.append(line)
+                line = word
+            else:
+                line = f"{line} {word}" if line else word
+        out.append(line)
+    return out
+
+
+def answer_lines(answer: str, width: int) -> list[list[tuple[str, str]]]:
+    """An answer as panel lines: prose wrapped, ``` fenced SQL highlighted behind a bar."""
+    out: list[list[tuple[str, str]]] = []
+    in_code = False
+    for raw in answer.split("\n"):
+        if raw.strip().startswith("```"):
+            in_code = not in_code
+            continue
+        if in_code:
+            line = raw.expandtabs(4)
+            for k in range(0, max(1, len(line)), max(1, width - 4)):
+                out.append([("class:ai.code", "  │ ")] + highlighted(line[k:k + width - 4]))
+        else:
+            out += [[("class:ai.text", "  " + l)] for l in wrap_text(raw, width - 2)]
+    return out
+
+
 @dataclass
 class PanelTab:
     name: str  # config value: history | schema | trace | monitor
@@ -577,8 +621,10 @@ class TabbedPanel:
         kb.add("left")(kb.add("h")(kb.add("s-tab")(lambda e: self.select((self.index - 1) % len(self.tabs)))))
         for i in range(len(tabs)):
             kb.add(str(i + 1))(lambda e, i=i: self.select(i))
-        for key in {k for t in tabs for k in t.keys}:
-            kb.add(key)(lambda e, key=key: self.tab.keys.get(key, lambda: None)())
+        for key in {k for t in tabs for k in t.keys}:  # only while a tab that has it shows,
+            # so another tab's own key (Ctrl-C, Backspace) keeps its usual meaning
+            kb.add(key, filter=Condition(lambda key=key: key in self.tab.keys))(
+                lambda e, key=key: self.tab.keys[key]())
         self.window = Window(
             ScrollingControl(self._fragments, focusable=True, show_cursor=False, key_bindings=kb,
                              get_cursor_position=lambda: Point(0, self.tab.cursor), move=self._move),
@@ -1070,6 +1116,7 @@ class Session:
     pagers: list = field(default_factory=list)  # cells whose large result keeps its cursor open
     browser: "Browser" = field(default_factory=lambda: Browser())  # the schema tab's place
     watch: "Watch" = field(default_factory=lambda: Watch())  # the monitor tab's last snapshot
+    chat: Chat = field(default_factory=Chat)  # the AI tab's conversation
     catalog_when: dt.datetime | None = None  # when Ctrl-O in the schema tab last read the catalog
     catalog_stale: bool = False  # a DDL ran since: the catalog may be out of date
     state: str = "idle"  # idle | connecting | online | offline | failed
@@ -1095,8 +1142,10 @@ class Session:
 
 class App:
     def __init__(self, profiles: list[Profile], abbrevs: Abbreviations, ui: UISettings,
-                 templates: Templates):
+                 templates: Templates, ai: AISettings | None = None):
         DATA_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)  # also holds passwords
+        self.assistant = Assistant(ai or AISettings())
+        self._ai_task = None  # the question being answered (Ctrl-C in the AI tab stops it)
         self.profiles = profiles
         self.abbrevs = abbrevs
         self.templates = templates
@@ -1130,6 +1179,9 @@ class App:
                                  keys={"a": self._template_add, "e": self._template_edit_current,
                                        "r": self._template_rename, "d": self._template_delete,
                                        "i": self._template_insert, "y": self._template_copy}),
+            "ai": PanelTab("ai", "AI", self._ai_items, lambda i: self._ai_prompt(),
+                           keys={"a": self._ai_prompt, "i": self._ai_insert, "y": self._ai_copy,
+                                 "c": self._ai_clear, "c-c": self._ai_stop}),
         }
         # every tab as wide as the trace tab needs, so switching tabs never moves the shell;
         # the monitor's wide tables get half the screen
@@ -1231,6 +1283,9 @@ class App:
             C("Schema", "Collect catalog", "Ctrl-O (Schema tab)", ("c-o",), "tab:schema"),
             C("Monitor", "Take snapshot", "Ctrl-O (Monitor tab)", ("c-o",), "tab:monitor"),
             C("Template", "Add template", "a (Template tab)", ("a",), "tab:template"),
+            C("AI", "Ask AI a question", "a (AI tab)", ("a",), "tab:ai"),
+            C("AI", "Insert SQL from the last answer", "i (AI tab)", ("i",), "tab:ai"),
+            C("AI", "New AI chat", "c (AI tab)", ("c",), "tab:ai"),
             C("Result", "Copy selected value", "y (result pane)", ("y",), "results"),
             C("Result", "Copy selected row", "Y (result pane)", ("Y",), "results"),
             C("Result", "Sort by selected column", "s (result pane)", ("s",), "results"),
@@ -1808,6 +1863,106 @@ class App:
             self.say(f"@{e['alias']}: " + ("not added" if e["id"] is None else "changes dropped"))
         elif cmd:
             self.say(f"not an editor command: :{cmd} (w, wq, x, q, q!)", error=True)
+
+    # -- AI: questions about SQL to Claude, with this session's context ---------------------
+    def _ai_items(self):
+        chat, width = self._session.chat, max(20, self.panel.width() - 4)
+        st = self.assistant.settings
+        head = [([("class:schema.title", "AI"), ("class:list.note", f"  {st.model} · Enter ask · i insert SQL · y copy · c new chat · Ctrl-C stop")],
+                 "", "")]
+        if not chat.turns:
+            return head + [(t, "class:list.note", "") for t in (
+                "Ask about SQL: Enter (or a) here, type, Enter.",
+                "Sent along: the database type, the catalog Ctrl-O",
+                "collected, the focused cell's SQL and its last error.",
+                "Result rows are never sent.")]
+        out = list(head)
+        for turn in chat.turns:
+            out.append(("", "", ""))
+            for k, line in enumerate(wrap_text(turn.question, width - 2) or [""]):
+                out.append(([("class:ai.you", "▸ " if k == 0 else "  "), ("class:ai.you", line)], "", ""))
+            out += [(frags, "", "") for frags in answer_lines(turn.answer, width)]
+            if turn.error:
+                out.append((f"  {turn.error}", "class:error", ""))
+            elif not turn.done:
+                out.append(("  …", "class:list.note", ""))
+        return out
+
+    def _ai_follow(self) -> None:
+        """Keep the newest line in view while an answer streams in."""
+        tab = self.panel.tabs[PANEL_TABS.index("ai")]
+        tab.cursor = max(0, len(self._ai_items()) - 1)
+        self.app.invalidate()
+
+    def _ai_prompt(self) -> None:
+        if self._session.chat.busy:
+            self.say("still answering: Ctrl-C in the AI tab stops it", error=True)
+            return
+        self._ask_for("ask AI:", "", lambda q: None if q.strip() else "type a question first", self._ai_send)
+
+    def _ai_send(self, question: str) -> None:
+        s = self._session
+        cell = self._target_cell()
+        outcome = ""
+        if cell.has_run:
+            errors = "".join(t for st, t in cell.output if st == "class:error")
+            outcome = "\n".join(x for x in (cell.result_title, errors) if x)
+        system = system_prompt(s.profile.type, s.columns, s.relations)
+        content = user_message(question, cell.buffer.text if cell.buffer else "", outcome)
+        turn = Turn(question)
+        s.chat.turns.append(turn)
+        s.chat.busy = True
+
+        def on_text(text: str) -> None:
+            turn.answer += text
+            self._ai_follow()
+
+        async def go():
+            try:
+                await self.assistant.ask(s.chat, system, content, on_text)
+            except asyncio.CancelledError:
+                turn.error = "stopped"
+            except Exception as e:  # the SDK's errors, or no SDK: shown in the tab
+                turn.error = error_message(e)
+            finally:
+                turn.done, s.chat.busy, self._ai_task = True, False, None
+                self._ai_follow()
+        self._ai_task = self.app.create_background_task(go())
+        self._ai_follow()
+
+    def _ai_last_answer(self) -> Turn | None:
+        done = [t for t in self._session.chat.turns if t.answer]
+        return done[-1] if done else None
+
+    def _ai_insert(self) -> None:
+        """The last answer's last SQL block at the cursor of the input area."""
+        t = self._ai_last_answer()
+        sql = last_sql(t.answer) if t else None
+        if not sql:
+            self.say("no SQL in the last answer", error=True)
+            return
+        cell = self._target_cell()
+        before = cell.buffer.document.text_before_cursor
+        cell.buffer.insert_text(("" if not before or before.endswith("\n") else "\n") + sql)
+        self.app.layout.focus(cell.window)
+        self.say("SQL from the AI tab inserted · u undoes")
+
+    def _ai_copy(self) -> None:
+        t = self._ai_last_answer()
+        if t:
+            self.copy_to_clipboard(t.answer, "the last answer")
+
+    def _ai_clear(self) -> None:
+        if self._session.chat.busy:
+            self.say("still answering: Ctrl-C stops it first", error=True)
+            return
+        self._session.chat = Chat()
+        self.panel.tab.cursor = 0
+        self.say("new AI chat")
+
+    def _ai_stop(self) -> None:
+        if self._ai_task is not None:
+            self._ai_task.cancel()
 
     # -- monitor: sessions, blocking, locks, top SQL, waits; refreshed while it shows ---------
     def _monitor_items(self):
@@ -2408,7 +2563,11 @@ class App:
         left += [(state_style, "●"), ("class:top.name", f" {s.profile.name} "), (state_style, state)]
         hint = self._template_hint()
         if hint or self.message:
-            left += [sep, ("class:top.error" if self.error and not hint else "class:top", hint or self.message)]
+            text = hint or self.message
+            if not hint and not self.error and text.endswith(" connected"):  # "<name> connected"
+                left += [sep, ("class:top", text[:-len("connected")]), ("class:top.connected", "connected")]
+            else:
+                left += [sep, ("class:top.error" if self.error and not hint else "class:top", text)]
         # the two switches, each with its key (or click it)
         if s.db is not None:
             on = s.db.autocommit
@@ -2421,7 +2580,7 @@ class App:
                      ("class:top.mode" if on else "class:top.off", "on" if on else "off", clicked(self.toggle_autotrace)),
                      ("class:top.dim", " F8")]
         left += [sep, ("class:top.dim", f"{s.profile.type} · {s.profile.target()}")]
-        right = " Ctrl-P commands · Ctrl-O run · Ctrl-N new cell · Ctrl-0~2 / Ctrl-W 0~3 conn · F4 statement · Ctrl-C cancel · ↑↓ cells · Alt-1~5 panel · Alt-9 result · Alt-0 prompt · Ctrl-W hjkl move · F1 save+quit · Ctrl-Q quit "
+        right = " Ctrl-P commands · Ctrl-O run · Ctrl-N new cell · Ctrl-0~2 / Ctrl-W 0~3 conn · F4 statement · Ctrl-C cancel · ↑↓ cells · Alt-1~6 panel · Alt-9 result · Alt-0 prompt · Ctrl-W hjkl move · F1 save+quit · Ctrl-Q quit "
         used = sum(get_cwidth(f[1]) for f in left)
         room = get_app().output.get_size().columns - used - get_cwidth(right)
         return left + ([("", " " * room), ("class:top.dim", right)] if room > 0 else [])
@@ -3150,5 +3309,5 @@ class App:
 
 
 def run(profiles: list[Profile], abbrevs: Abbreviations, ui: UISettings | None = None,
-        templates: Templates | None = None) -> None:
-    App(profiles, abbrevs, ui or UISettings(), templates or Templates()).run()
+        templates: Templates | None = None, ai: AISettings | None = None) -> None:
+    App(profiles, abbrevs, ui or UISettings(), templates or Templates(), ai).run()

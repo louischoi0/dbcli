@@ -49,7 +49,7 @@ class Profile:
         return self.options.get("password")
 
 
-PANEL_TABS = ("history", "schema", "trace", "monitor", "template")  # Alt-1..5, in this order
+PANEL_TABS = ("history", "schema", "trace", "monitor", "template", "ai")  # Alt-1..6, in this order
 
 
 @dataclass
@@ -59,12 +59,25 @@ class UISettings:
     editing_mode: str = "vi"  # vi | emacs  (input area key bindings)
 
 
+AI_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+
+@dataclass
+class AISettings:
+    """[ai]: the AI tab's model. The key comes from `api_key` here, else the Anthropic SDK's
+    own lookup (ANTHROPIC_API_KEY, an `ant auth login` profile)."""
+    model: str = "claude-opus-5-5"
+    effort: str = "medium"  # low | medium | high | xhigh | max
+    api_key: str | None = None
+
+
 @dataclass
 class Config:
     profiles: list[Profile]
     abbreviations: dict[str, str]
     ui: UISettings = field(default_factory=UISettings)
     templates: dict[str, str] = field(default_factory=dict)
+    ai: AISettings = field(default_factory=AISettings)
 
 
 def load(path: Path = CONFIG_PATH) -> Config:
@@ -94,4 +107,10 @@ def load(path: Path = CONFIG_PATH) -> Config:
     for name, body in templates.items():
         if not isinstance(body, str) or not re.fullmatch(r"[A-Za-z_][\w-]*", name):
             raise ConfigError(f"[templates] {name}: the name takes letters, digits, _ and -, the value is an SQL string")
-    return Config(profiles, {**DEFAULT_ABBREVIATIONS, **data.get("abbreviations", {})}, ui, templates)
+    ai_data = data.get("ai", {})
+    ai = AISettings(model=str(ai_data.get("model", AISettings.model)),
+                    effort=str(ai_data.get("effort", AISettings.effort)),
+                    api_key=ai_data.get("api_key") or None)
+    if ai.effort not in AI_EFFORTS:
+        raise ConfigError(f"[ai] effort must be one of {', '.join(AI_EFFORTS)}")
+    return Config(profiles, {**DEFAULT_ABBREVIATIONS, **data.get("abbreviations", {})}, ui, templates, ai)
