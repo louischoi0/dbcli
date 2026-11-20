@@ -11,7 +11,7 @@ editing, notebook-like cells, Oracle autotrace and an AI assistant panel.
   or a row to the clipboard (OSC 52 / tmux), and edit a cell in place: `i`, change it, `Enter` runs the
   `UPDATE` in a new cell.
 - **Side panel** with tabs: History, Schema browser, Trace (execution plan with E-Rows vs A-Rows,
-  statistics), Monitor (sessions), Template and AI.
+  statistics), Monitor (sessions), Bookmark (saved queries; one with an `@alias` is a template) and AI.
 - **Autotrace** (Oracle, on by default): every run shows `DBMS_XPLAN.DISPLAY_CURSOR` (ALLSTATS LAST)
   and the session statistics.
 - **AI tab**: ask Claude about your SQL; `@c0` sends cell #c0's SQL and its last error as context,
@@ -74,10 +74,11 @@ Without a key, everything except the AI tab works as usual.
 | `Ctrl-O`, `Alt-Enter`, `F5` | Run the input |
 | `F4` / `O` (NORMAL) | Run only the statement / the line under the cursor |
 | `Ctrl-N` | New cell |
+| `Ctrl-R` | Bookmark the cell's SQL (an optional memo and `@alias`; `U` redoes in NORMAL mode) |
 | `$` / `%` (NORMAL) | Top / bottom cell |
 | `Ctrl-U` | Format the cell's SQL |
 | `Alt-8` / `Alt-9` / `Alt-0` | Focus the prompt / side panel / result pane |
-| `Alt-1` … `Alt-6` | Panel tab: History / Schema / Trace / Monitor / Template / AI |
+| `Alt-1` … `Alt-6` | Panel tab: History / Schema / Trace / Monitor / Bookmark / AI |
 | `Ctrl-W h j k l` | Move between panes |
 | `F7` / `F8` | Autocommit / autotrace on or off |
 | `Ctrl-P` | Command palette |

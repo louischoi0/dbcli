@@ -109,13 +109,13 @@ class StoreTest(unittest.TestCase):
 
     def test_add_update_remove_persist(self):
         t = Templates({}, path=self.path)
-        a = t.add("x", "select $1 from dual")
+        a = t.add("select $1 from dual", alias="x")
         self.assertEqual(t.expand("@x 1"), "select 1 from dual")
         t.update(a.id, alias="y", body="select $1, $2 from dual")
         self.assertEqual(Templates(path=self.path).arity("y"), 2)
-        b = t.add("z", "select 1")
+        b = t.add("select 1", alias="z")
         t.remove(a.id)
-        c = t.add("w", "select 2")
+        c = t.add("select 2", alias="w")
         self.assertGreater(c.id, b.id)  # ids are never reused
         self.assertEqual([x.alias for x in Templates(path=self.path).entries()], ["z", "w"])
 
@@ -125,15 +125,43 @@ class StoreTest(unittest.TestCase):
         self.assertIsNone(t.check_alias("a", keep=1))  # renaming to itself
         self.assertIn("letters", t.check_alias("1x"))
         with self.assertRaises(TemplateError):
-            t.add("a", "select 2")
+            t.add("select 2", alias="a")
 
     def test_other_terminal_changes_are_seen(self):
         mine = Templates({"a": "select 1"}, path=self.path)
         other = Templates(path=self.path)
-        other.add("b", "select 2")
+        other.add("select 2", alias="b")
         st = self.path.stat()
         os.utime(self.path, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))  # a later write
         self.assertEqual(mine.names(), ["a", "b"])
+
+    def test_bookmark_without_alias_is_no_template(self):
+        t = Templates({}, path=self.path)
+        b = t.add("select * from v$session where status = 'ACTIVE'", memo="active sessions")
+        self.assertEqual(t.names(), [])  # no @alias: not callable
+        self.assertFalse(t)
+        self.assertEqual([x.label for x in t.entries()], ["active sessions"])
+        t.update(b.id, alias="act")
+        self.assertEqual(Templates(path=self.path).expand("@act"), b.body)
+        t.update(b.id, alias=None)
+        self.assertEqual(Templates(path=self.path).names(), [])
+        self.assertIsNone(t.check_alias(None))
+
+    def test_old_templates_file_becomes_bookmarks(self):
+        legacy = Path(self.dir.name) / "templates.json"
+        legacy.write_text(json.dumps({"next_id": 3, "templates": [{"id": 2, "alias": "a", "body": "select $1"}]}))
+        path = Path(self.dir.name) / "bookmarks.json"
+        t = Templates({"zz": "select 9"}, path=path, legacy=legacy)
+        self.assertEqual([(x.id, x.memo, x.alias) for x in t.entries()], [(2, "", "a")])
+        self.assertEqual(json.loads(path.read_text())["bookmarks"][0]["memo"], "")
+        plain = t.add("select 1")  # no memo, no alias: a plain bookmark
+        self.assertEqual((plain.id, plain.label), (3, "#3"))
+
+    def test_name_of_before_becomes_the_memo(self):
+        self.path.write_text(json.dumps({"next_id": 3, "bookmarks": [
+            {"id": 1, "name": "a", "alias": "a", "body": "select 1"},  # filled from the alias: no memo
+            {"id": 2, "name": "my query", "alias": None, "body": "select 2"}]}))
+        self.assertEqual([x.memo for x in Templates(path=self.path).entries()], ["", "my query"])
 
 
 if __name__ == "__main__":

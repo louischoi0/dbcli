@@ -49,7 +49,7 @@ class Profile:
         return self.options.get("password")
 
 
-PANEL_TABS = ("history", "schema", "trace", "monitor", "template", "ai")  # Alt-1..6, in this order
+PANEL_TABS = ("history", "schema", "trace", "monitor", "bookmark", "ai")  # Alt-1..6, in this order
 
 
 @dataclass
@@ -127,6 +127,8 @@ def load(path: Path = CONFIG_PATH) -> Config:
         panel = "history"
     if panel == "navigator":  # now the schema browser
         panel = "schema"
+    if panel == "template":  # now the bookmarks (those with an @alias are the templates)
+        panel = "bookmark"
     ui = UISettings(panel=panel,
                     show_panel=bool(ui_data.get("show_panel", True)),
                     editing_mode=ui_data.get("editing_mode", "vi"))

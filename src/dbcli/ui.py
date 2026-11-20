@@ -68,7 +68,7 @@ from .db import (MAX_ROWS, PAGE_ROWS, changes_schema, error_text, format_table, 
 from . import monitor, schema
 from .formatter import NotFormatted, format_sql
 from .statements import statement_at
-from .grid import BORDER, HEADER_LINES, Grid, build, copy_text
+from .grid import BORDER, HEADER_LINES, Grid, build, copy_text, fit
 from .cell_edit import EditError, build_update, source_table
 from .objects import blank_noise, column_refs, in_table_slot, scan, table_refs
 from .oracle_hints import HINT_WEIGHT, HINTS
@@ -175,7 +175,7 @@ STYLE = Style.from_dict({
     "palette.key": f"bg:#262626 {ORANGE}",
     "palette.match": f"bg:#262626 {SKY} bold",
     "list.note": DIM,
-    "list.id": ORANGE,  # a row's number in the panel: History's run numbers, Template's ids
+    "list.id": ORANGE,  # a row's number in the panel: History's run numbers, Bookmark's ids
     "list.empty": f"{DIM} italic",
     # the AI tab
     "ai.you": f"{SKY} bold",  # a question
@@ -590,6 +590,25 @@ class RefHighlight(Processor):
             return Transformation(ti.fragments)
         text = "".join(f[1] for f in ti.fragments)
         return Transformation(marked_refs(text, "class:input"))
+
+
+def cut_fragments(frags: list[tuple[str, str]], width: int) -> list[tuple[str, str]]:
+    """The fragments cut to `width` display cells, ending in … when something was dropped."""
+    if sum(get_cwidth(t) for _, t in frags) <= width:
+        return frags
+    out, left = [], width - 1  # one cell for the …
+    for st, t in frags:
+        kept = ""
+        for ch in t:
+            if get_cwidth(ch) > left:
+                break
+            kept += ch
+            left -= get_cwidth(ch)
+        if kept:
+            out.append((st, kept))
+        if kept != t:
+            break
+    return out + ([("class:list.note", "…")] if width > 0 else [])
 
 
 def wrap_text(text: str, width: int) -> list[str]:
@@ -1287,9 +1306,10 @@ class App:
                               width=self._trace_width),
             "monitor": PanelTab("monitor", "Monitor", self._monitor_items, lambda i: None,
                                 keys={"c-o": self._monitor_now}),
-            "template": PanelTab("template", "Template", self._template_items, self._template_edit,
-                                 keys={"a": self._template_add, "e": self._template_edit_current,
-                                       "r": self._template_rename, "d": self._template_delete,
+            "bookmark": PanelTab("bookmark", "Bookmark", self._template_items, self._template_pick,
+                                 keys={"a": self._template_add, "A": self._template_add_cell,
+                                       "e": self._template_edit_current, "r": self._template_rename,
+                                       "t": self._template_alias, "d": self._template_delete,
                                        "i": self._template_insert, "y": self._template_copy}),
             "ai": PanelTab("ai", "AI", self._ai_items, self._ai_pick,
                            keys={"a": self._ai_prompt, "i": self._ai_insert, "y": self._ai_copy,
@@ -1299,7 +1319,7 @@ class App:
         # the monitor's wide tables get half the screen
         self.panel = TabbedPanel([tabs[n] for n in PANEL_TABS], ui.panel, width=self._panel_width)
         self._tpl_delete: int | None = None  # the template `d` asked about (a second `d` deletes)
-        self._ask: dict | None = None  # the one-line question under the panel (a template's alias)
+        self._ask: dict | None = None  # the one-line question under the panel (a bookmark's name, its @alias)
         self.ask_buffer = Buffer(multiline=False)
         ask_kb = KeyBindings()
         ask_kb.add("enter")(lambda e: self._ask_done(self.ask_buffer.text.strip()))
@@ -1312,7 +1332,7 @@ class App:
             height=1, style="class:input",
             get_line_prefix=lambda n, w: [("class:ai.prompt" if self._ask and self._ask["label"] == AI_PROMPT
                                            else "class:list.note", f" {self._ask['label']} " if self._ask else " ")])
-        # the template editor: the Template tab's place while a body is edited (vi keys, `:w` …)
+        # the bookmark editor: the Bookmark tab's place while a query is edited (vi keys, `:w` …)
         self._tpl_edit: dict | None = None  # {"id": id or None for a new one, "alias", "saved": body}
         self.editor_buffer = Buffer(multiline=True, completer=self.completer, complete_while_typing=False)
         ed_kb = KeyBindings()
@@ -1324,7 +1344,7 @@ class App:
             BufferControl(buffer=self.editor_buffer, key_bindings=ed_kb, input_processors=[SqlHighlight()]),
             wrap_lines=True, style="class:input",
             get_line_prefix=lambda n, w: [("class:list.note", f"{n + 1:>3} " if not w else "    ")])
-        editing = Condition(lambda: self._tpl_edit is not None and self.panel.tab.name == "template")
+        editing = Condition(lambda: self._tpl_edit is not None and self.panel.tab.name == "bookmark")
         editor = HSplit([Window(FormattedTextControl(self._editor_header), height=1, char="─", style="class:border"),
                          self.editor_window], width=lambda: Dimension.exact(self.panel.width()))
         top = VSplit([
@@ -1401,7 +1421,9 @@ class App:
             *tabs,
             C("Schema", "Collect catalog", "Ctrl-O (Schema tab)", ("c-o",), "tab:schema"),
             C("Monitor", "Take snapshot", "Ctrl-O (Monitor tab)", ("c-o",), "tab:monitor"),
-            C("Template", "Add template", "a (Template tab)", ("a",), "tab:template"),
+            C("Bookmark", "Add bookmark", "a (Bookmark tab)", ("a",), "tab:bookmark"),
+            C("Bookmark", "Bookmark the current cell's SQL", "Ctrl-R", ("c-r",), "cell"),
+            C("Bookmark", "Set a bookmark's @alias (template)", "t (Bookmark tab)", ("t",), "tab:bookmark"),
             C("AI", "Ask AI a question", "a (AI tab)", ("a",), "tab:ai"),
             C("AI", "Insert SQL from the last answer", "i (AI tab)", ("i",), "tab:ai"),
             C("AI", "New AI chat", "c (AI tab)", ("c",), "tab:ai"),
@@ -1825,54 +1847,115 @@ class App:
                  + highlighted(" ".join(text.split())), "", "")
                 for n, when, text in s.history]
 
-    # -- template: the saved `@alias` templates; add, edit (in vim), rename, delete -----------
+    # -- bookmark: saved queries with a name; one with an `@alias` is a template too ------------
     def _template_items(self):
         entries = self.templates.entries()
-        head = [([("class:schema.title", "Template"),
-                  ("class:list.note", "  Enter/e edit · a add · r rename · d delete · i insert · y copy")],
+        head = [([("class:schema.title", "Bookmark"),
+                  ("class:list.note", "  Enter prompt · e edit · a/A add · r memo · t @alias · d y")],
                  "", "")]
         if not entries:
-            return head + [("(none: a adds one)", "class:list.empty", "")]
+            return head + [("(none: a adds one, A bookmarks the current cell)", "class:list.empty", "")]
         idw = len(str(max(t.id for t in entries)))
-        aw = max(len(t.alias) for t in entries) + 1
-        return head + [([("class:list.id", f"{t.id:>{idw}} "), ("class:schema.title", f"@{t.alias:<{aw}}")]
-                        + highlighted(" ".join(t.body.split())), "", "")
-                       for t in entries]
+        aw = max((len(t.alias) + 2 for t in entries if t.alias), default=0)
+        room = self.panel.width() - 3  # the panel draws a space before and after each line, and the scrollbar
+        out = head
+        for t in entries:
+            # id, @alias and the query from the left; the memo at the right end
+            name = fit(t.memo, max(8, room // 3)) if t.memo else ""
+            frags = [("class:list.id", f"{t.id:>{idw}} ")]
+            if aw:
+                frags.append(("class:prompt.num", f"{'@' + t.alias if t.alias else '':<{aw}}"))
+            used = sum(get_cwidth(x) for _, x in frags)
+            query = cut_fragments(highlighted(" ".join(t.body.split())), room - used - get_cwidth(name) - 2)
+            used += sum(get_cwidth(x) for _, x in query)
+            gap = " " * max(2 if name else 0, room - used - get_cwidth(name))
+            out.append((frags + query + [("", gap), ("class:schema.title", name)], "", ""))
+        return out
 
     def _template_current(self):
-        """The template on the panel's cursor line (the first line is the header)."""
+        """The bookmark on the panel's cursor line (the first line is the header)."""
         i = self.panel.tab.cursor - 1
         entries = self.templates.entries()
         return entries[i] if 0 <= i < len(entries) else None
 
-    def _template_edit(self, i: int) -> None:  # Enter (or a click) on a line
-        self._template_edit_current()
+    def _template_pick(self, i: int) -> None:  # Enter (or a click) on a line: its SQL into the prompt
+        self._template_put(as_call=False)
 
     def _template_edit_current(self) -> None:
         t = self._template_current()
         if t is None:
             return
         self._tpl_delete = None
-        self._open_editor(t.id, t.alias, t.body)
+        self._open_editor(t.id, t.memo, t.alias, t.body)
+
+    def _template_ask_alias(self, done: Callable[[str | None], None], text: str = "",
+                            keep: int | None = None) -> None:
+        self._ask_for("@alias (optional, makes it a template):", text,
+                      lambda a: self.templates.check_alias(a.lstrip("@"), keep=keep),
+                      lambda a: done(a.lstrip("@") or None))
+
+    def _template_ask_memo(self, done: Callable[[str], None], text: str = "") -> None:
+        self._ask_for("memo (optional):", text, lambda m: None, done)
 
     def _template_add(self) -> None:
+        """`a`: an optional memo and @alias, then the query in the editor."""
         self._tpl_delete = None
 
-        def got(alias: str) -> None:
-            self._open_editor(None, alias, "")
-        self._ask_for("new alias:", "", lambda a: self.templates.check_alias(a), got)
+        def got_memo(memo: str) -> None:
+            self._template_ask_alias(lambda alias: self._open_editor(None, memo, alias, ""))
+        self._template_ask_memo(got_memo)
+
+    def _template_add_cell(self, cell: Cell | None = None) -> None:
+        """`A` in the Bookmark tab, Ctrl-R in a cell: bookmark the cell's SQL (the cell last
+        edited for `A`), asking for an optional memo and @alias under the panel."""
+        self._tpl_delete = None
+        cell = cell or self._target_cell()
+        body = cell.buffer.text.strip() or (cell.ran_text or "").strip()
+        if not body:
+            self.say("the cell is empty: nothing to bookmark", error=True)
+            return
+
+        def got_memo(memo: str) -> None:
+            def got_alias(alias: str | None) -> None:
+                try:
+                    t = self.templates.add(body, memo, alias)
+                except TemplateError as e:
+                    self.say(str(e), error=True)
+                    return
+                self.panel.tabs[PANEL_TABS.index("bookmark")].cursor = \
+                    1 + [x.id for x in self.templates.entries()].index(t.id)
+                self.say(f"bookmarked as #{t.id}" + (f" @{t.alias}" if t.alias else "") + (f": {t.memo}" if t.memo else ""))
+            self._template_ask_alias(got_alias)
+        self.show_panel = True  # the questions open under the panel, on the Bookmark tab
+        self.panel.select(PANEL_TABS.index("bookmark"))
+        self._template_ask_memo(got_memo)
 
     def _template_rename(self) -> None:
+        """`r`: change the memo (empty: none)."""
         t = self._template_current()
         if t is None:
             return
         self._tpl_delete = None
 
-        def got(alias: str, old: str = t.alias) -> None:
-            if alias != old:
-                self.templates.update(t.id, alias=alias)
-                self.say(f"@{old} is @{alias} now")
-        self._ask_for(f"rename @{t.alias} to:", t.alias, lambda a: self.templates.check_alias(a, keep=t.id), got)
+        def got(memo: str) -> None:
+            if memo != t.memo:
+                self.templates.update(t.id, memo=memo)
+                self.say(f"#{t.id}: memo " + (f"is {memo!r} now" if memo else "cleared"))
+        self._template_ask_memo(got, t.memo)
+
+    def _template_alias(self) -> None:
+        """`t`: give the bookmark an @alias (it is then a template: `@alias args`), or clear it."""
+        t = self._template_current()
+        if t is None:
+            return
+        self._tpl_delete = None
+
+        def got(alias: str | None) -> None:
+            if alias == t.alias:
+                return
+            self.templates.update(t.id, alias=alias)
+            self.say(f"{t.label}: @{alias}, a template now" if alias else f"{t.label}: no alias, not a template")
+        self._template_ask_alias(got, t.alias or "", keep=t.id)
 
     def _template_delete(self) -> None:
         t = self._template_current()
@@ -1880,20 +1963,30 @@ class App:
             return
         if self._tpl_delete != t.id:
             self._tpl_delete = t.id
-            self.say(f"d again deletes @{t.alias}")
+            self.say(f"d again deletes {t.label}")
             return
         self._tpl_delete = None
         self.templates.remove(t.id)
-        self.say(f"@{t.alias} deleted")
+        self.say(f"{t.label} deleted")
 
     def _template_insert(self) -> None:
-        """`@alias ` at the cursor of the input area: arguments next, then Tab expands it."""
+        """`i`: `@alias ` at the prompt's cursor for a template (arguments next, then Tab
+        expands it), the SQL itself for a plain bookmark."""
+        self._template_put(as_call=True)
+
+    def _template_put(self, as_call: bool) -> None:
         t = self._template_current()
         if t is None:
             return
         cell = self._target_cell()
-        before = cell.buffer.document.text_before_cursor
-        cell.buffer.insert_text(("" if not before or before[-1] in " \t\n(,=" else " ") + f"@{t.alias} ")
+        buf = cell.buffer
+        before = buf.document.text_before_cursor
+        if as_call and t.alias:
+            buf.insert_text(("" if not before or before[-1] in " \t\n(,=" else " ") + f"@{t.alias} ")
+        elif not buf.text.strip():
+            buf.set_document(Document(t.body, len(t.body)))
+        else:  # the cell has text: the query goes on a line of its own at the cursor
+            buf.insert_text(("" if not before or before.endswith("\n") else "\n") + t.body)
         self.app.layout.focus(cell.window)
         if self.vi:
             self.app.vi_state.input_mode = InputMode.INSERT
@@ -1901,7 +1994,7 @@ class App:
     def _template_copy(self) -> None:
         t = self._template_current()
         if t is not None:
-            self.copy_to_clipboard(t.body, f"@{t.alias}")
+            self.copy_to_clipboard(t.body, t.label)
 
     def _ask_for(self, label: str, text: str, check: Callable[[str], str | None],
                  done: Callable[[str], None]) -> None:
@@ -1924,7 +2017,9 @@ class App:
                 return
         self._ask = None
         back = ask["back"]
-        self.app.layout.focus(back if back is self.editor_window and self._tpl_edit else self.panel.window)
+        # back where it was asked from: the editor, a cell (Ctrl-R), else the panel
+        in_cell = back in self.cell_of and self.cell_of[back].session is self._session
+        self.app.layout.focus(back if (back is self.editor_window and self._tpl_edit) or in_cell else self.panel.window)
         if self.vi:
             self.app.vi_state.input_mode = InputMode.NAVIGATION
         if answer is None:
@@ -1932,9 +2027,10 @@ class App:
         else:
             ask["done"](answer)
 
-    def _open_editor(self, id: int | None, alias: str, body: str) -> None:
-        """Edit a body in the panel (a new template when `id` is None), in INSERT mode."""
-        self._tpl_edit = {"id": id, "alias": alias, "saved": body}
+    def _open_editor(self, id: int | None, memo: str, alias: str | None, body: str) -> None:
+        """Edit a bookmark's query in the panel (a new bookmark when `id` is None), in INSERT mode."""
+        label = memo or (f"@{alias}" if alias else "bookmark")
+        self._tpl_edit = {"id": id, "memo": memo, "alias": alias, "label": label, "saved": body}
         self.editor_buffer.reset(Document(body, 0))
         self.app.layout.focus(self.editor_window)
         if self.vi:
@@ -1946,23 +2042,25 @@ class App:
         if e is None:
             return []
         changed = self.editor_buffer.text != e["saved"]
-        title = f" @{e['alias']}" + (" (new)" if e["id"] is None else f" #{e['id']}") + (" [+]" if changed else "")
+        title = (f" {e['memo']}" if e["memo"] else "") + (f" @{e['alias']}" if e["alias"] else "") + \
+            (" (new)" if e["id"] is None else f" #{e['id']}") + (" [+]" if changed else "")
+        args = " · $1 $2 … arguments" if e["alias"] else ""
         return [("class:tab.active.focused", title + " "),
-                ("class:list.note", " :w save · :wq save+close · :q close · :q! drop · $1 $2 … arguments ")]
+                ("class:list.note", f" :w save · :wq save+close · :q close · :q! drop{args} ")]
 
     def _editor_save(self) -> bool:
         e, body = self._tpl_edit, self.editor_buffer.text.rstrip()
         if not body.strip():
-            self.say(f"@{e['alias']}: an empty body is not saved (:q! drops it; d deletes a template)", error=True)
+            self.say(f"{e['label']}: an empty query is not saved (:q! drops it; d deletes a bookmark)", error=True)
             return False
         try:
             if e["id"] is None:
-                t = self.templates.add(e["alias"], body)
+                t = self.templates.add(body, e["memo"], e["alias"])
                 e["id"] = t.id
-                self.say(f"@{e['alias']} added")
+                self.say(f"{e['label']} added")
             else:
                 self.templates.update(e["id"], body=body)
-                self.say(f"@{e['alias']} saved")
+                self.say(f"{e['label']} saved")
         except TemplateError as err:
             self.say(str(err), error=True)
             return False
@@ -1998,7 +2096,7 @@ class App:
                 self._editor_close()
         elif cmd == "q!":
             self._editor_close()
-            self.say(f"@{e['alias']}: " + ("not added" if e["id"] is None else "changes dropped"))
+            self.say(f"{e['label']}: " + ("not added" if e["id"] is None else "changes dropped"))
         elif cmd:
             self.say(f"not an editor command: :{cmd} (w, wq, x, q, q!)", error=True)
 
@@ -2865,7 +2963,7 @@ class App:
             def _(event, i=i):
                 self.show_panel = True
                 self.panel.select(i)
-                editing = self._tpl_edit is not None and self.panel.tab.name == "template"
+                editing = self._tpl_edit is not None and self.panel.tab.name == "bookmark"
                 event.app.layout.focus(self.editor_window if editing else self.panel.window)
                 if self.panel.tab.name == "ai" and self._ask is None and not self._session.chat.busy \
                         and not self._ai_picking():
@@ -2904,9 +3002,9 @@ class App:
             event.app.layout.focus(self.results.window)
 
         @kb.add(PANEL_KEY)
-        def _(event):  # Alt+9: the side panel, on the tab it shows (the template editor if open)
+        def _(event):  # Alt+9: the side panel, on the tab it shows (the bookmark editor if open)
             self.show_panel = True
-            editing = self._tpl_edit is not None and self.panel.tab.name == "template"
+            editing = self._tpl_edit is not None and self.panel.tab.name == "bookmark"
             event.app.layout.focus(self.editor_window if editing else self.panel.window)
 
         @kb.add(PROMPT_KEY)
@@ -3134,6 +3232,10 @@ class App:
         def _(event):  # NORMAL Shift+O: run only the line under the cursor (vim's "open line above" gives way)
             self.run_line(self._focused_cell())
 
+        @kb.add("c-r", filter=in_shell)
+        def _(event):  # bookmark the cell's SQL (asks for a name and an optional @alias)
+            self._template_add_cell(self._focused_cell())
+
         @kb.add("f4", filter=in_shell)
         def _(event):  # the complete statement under the cursor, on a connection of its own
             self.run_parallel(self._focused_cell())
@@ -3163,8 +3265,9 @@ class App:
                 buf.save_to_undo_stack()
                 buf.set_document(Document(""), bypass_readonly=True)
 
-        # Ctrl-R is redo in Vim (prompt_toolkit binds it to reverse search instead).
-        @kb.add("c-r", filter=in_shell & vi_navigation_mode, save_before=lambda e: False)
+        # Redo: Ctrl-R in Vim, but here Ctrl-R bookmarks the cell, so NORMAL `U` redoes
+        # (prompt_toolkit has no redo key of its own in vi mode).
+        @kb.add("U", filter=in_shell & vi_navigation_mode, save_before=lambda e: False)
         def _(event):
             for _ in range(event.arg):
                 event.current_buffer.redo()

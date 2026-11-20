@@ -90,7 +90,7 @@ The top bar, the shell on the left, the panel on the right, and the result pane 
 |---|---|
 | Top bar | From the left: vim mode, connection state (●), connection name, online state, the latest message, the **autocommit** and **autotrace** switches with their keys, and the target. A narrow terminal cuts from the right, so the important parts come first. The right end lists the main keys. |
 | Shell | The `> ` input area works **like a text editor**: Enter is a new line and **Ctrl-O** runs. A cell of several lines ends with `_ ` on its last line, so `>` … `_` mark where each block starts and ends. The shell keeps each statement run and a short outcome (`(2 rows)`, `OK, 3 row(s) affected`, errors). |
-| Panel | One panel with the **History / Schema / Trace / Monitor / Template / AI** tabs (`Alt-1` to `Alt-6`). The panel is as wide as a plan needs on every tab (at most 96 columns, half the screen), so switching tabs never moves the shell. The first tab shown is `[ui] panel` (section 7). |
+| Panel | One panel with the **History / Schema / Trace / Monitor / Bookmark / AI** tabs (`Alt-1` to `Alt-6`). The panel is as wide as a plan needs on every tab (at most 96 columns, half the screen), so switching tabs never moves the shell. The first tab shown is `[ui] panel` (section 7). |
 | Result | The latest result as a **boxed table**. Each header cell has the column name on the left and its type on the right (`N` number, `VCH` varchar2, `CH` char, `CL` clob, `BB` blob, `R` raw, `D` date, `T` timestamp, `TZ` timestamp with time zone, `RID` rowid …; Oracle only), the type in a toned-down shade of its values' color. Values are colored by the column's type (numbers green, text yellow, dates lavender, binary teal, booleans orange), numbers right-aligned, NULL dimmed, every other row shaded. Cells are cut at 40 columns with `…`, line breaks show as `↵`. |
 
 Connection state in the top bar:
@@ -109,11 +109,11 @@ Panel tabs:
 | History | This connection's queries, newest first, up to 500. Each row starts with its run number and when it ran (`HH:MM` today, `MM-DD` before). Numbers count up like an auto-increment: the first query ever run on the connection is 1, each run takes the next one, and they never change. A query run again moves to the top under its new number. Hints are colored as in the input area. |
 | Schema | A schema browser (section 6.2): the kinds of objects with their counts, a kind's objects, then one object's details (columns, indexes, constraints, triggers, arguments, compile errors) and its DDL. |
 | Monitor | Sessions, blocking, locked objects, top SQL and wait events, read when you press Ctrl-O in the tab (section 6.3). |
-| Template | The saved templates (section 5.4), one to a line: id, `@alias` and body. Enter edits a body right in the panel (vi keys, `:wq`); `a` adds, `r` renames, `d` deletes. |
+| Bookmark | Saved queries (section 5.4), one to a line: id, `@alias` (a template), query, and the memo at the right end. Enter puts it in the prompt, `e` edits it right in the panel (vi keys, `:wq`); `a` adds, `A` (or `Ctrl-R` in a cell) bookmarks the current cell, `t` sets the alias, `d` deletes. |
 | AI | Questions about SQL to Claude, answered in the tab (section 6.4). |
 | Trace | With autotrace on (Oracle): the run's **estimated plan** (EXPLAIN PLAN + DBMS_XPLAN), **actual plan** (DISPLAY_CURSOR `ALLSTATS LAST`) and **session statistics**, drawn as a tree (section 6.1). It shows the trace of the cell focused in the shell. |
 
-Colors are soft grays with sky blue: the focused pane's title (the selected tab in the panel), the prompt, table headers and `online` are sky blue; `connected` in the top bar's message is green; only offline and errors are red. Orange marks `conn0` in a cell's prompt, an `off` switch in the top bar (`autocommit off`, `autotrace off`) and the numbers in the panel (History's run numbers, Template's ids). Ctrl-B hides the panel so the shell takes the full width.
+Colors are soft grays with sky blue: the focused pane's title (the selected tab in the panel), the prompt, table headers and `online` are sky blue; `connected` in the top bar's message is green; only offline and errors are red. Orange marks `conn0` in a cell's prompt, an `off` switch in the top bar (`autocommit off`, `autotrace off`) and the numbers in the panel (History's run numbers, Bookmark's ids). Ctrl-B hides the panel so the shell takes the full width.
 The layout follows the terminal's size. Panes, tabs, list items and the two switches in the top bar can be clicked.
 
 ## 4. Keys
@@ -152,7 +152,7 @@ After a run it returns to INSERT mode, ready for the next query.
 | Mode | Main keys |
 |---|---|
 | INSERT | typing, `Enter` new line, `Tab` input helpers (section 5), `Esc` → NORMAL |
-| NORMAL | `h j k l` `w b e` `0 $` `gg G` move · `i a I A o O` insert · `x dd dw D` delete · `cw cc C` change · `yy p P` yank and put · `u` undo · `Ctrl-R` redo · `v V` select · counts (`3dd`) |
+| NORMAL | `h j k l` `w b e` `0 $` `gg G` move · `i a I A o O` insert · `x dd dw D` delete · `cw cc C` change · `yy p P` yank and put · `u` undo · `U` redo (Ctrl-R bookmarks the cell, below) · `v V` select · counts (`3dd`) |
 | Both | `↑` / `↓` on the first / last line: the previous / next cell (section 6, "Cells"; `k` / `j` in NORMAL) · `Ctrl-C` cancels a running statement (on its cell; on an empty input, or in the panel or the result pane, everything running: Oracle answers ORA-01013 and the connection stays usable), else clears the input cell, or drops the edits of an earlier cell · `Ctrl-L` clears the shell's cells · `Ctrl-D` on an empty input quits |
 
 - **`Ctrl-U` formats the cell under the cursor** (sqlparse): one select item to a line, `FROM` / `JOIN` / `WHERE` / `AND` / `GROUP BY` on lines of their own, subqueries indented, spaces around operators. Keywords and names keep the case you typed; comments and hints stay. `u` (NORMAL mode) undoes it. PL/SQL blocks and `@template` calls are left alone. (It replaces vi's "delete to the line's start"; in the panel and the result pane Ctrl-U still scrolls.)
@@ -168,7 +168,7 @@ After a run it returns to INSERT mode, ready for the next query.
 | `Alt-8` | The prompt (the input cell), from any pane, in INSERT mode |
 | `Alt-9` | The side panel, on the tab it shows (shown again if Ctrl-B hid it) |
 | `Alt-0` | The result pane |
-| `Alt-1` … `Alt-6` | Opens the panel on History / Schema / Trace / Monitor / Template / AI |
+| `Alt-1` … `Alt-6` | Opens the panel on History / Schema / Trace / Monitor / Bookmark / AI |
 | `Ctrl-W h` / `j` / `k` / `l` | The pane to the left / below / above / right |
 | `Ctrl-W` + arrow, `Ctrl-W Ctrl-H/J/K/L` | The same |
 | `Ctrl-W w`, `Ctrl-W Ctrl-W` | The next pane |
@@ -199,7 +199,7 @@ Editing works on the result of a query on one plain table (no join, subquery, un
 | Key | Does |
 |---|---|
 | `→` / `←`, `l` / `h`, `Tab` / `Shift-Tab` | Next / previous tab (wrapping around) |
-| `1` … `6` | History / Schema / Trace / Monitor / Template / AI |
+| `1` … `6` | History / Schema / Trace / Monitor / Bookmark / AI |
 | `j` / `k`, `↓` / `↑` | Moves the selection |
 | `g` / `G`, `Home` / `End` | Top / bottom |
 | `PageUp` / `PageDown` | Scroll the panel a screen at a time, **wherever the focus is** (the prompt, the result pane, the panel) |
@@ -215,7 +215,7 @@ Editing works on the result of a query on one plain table (no join, subquery, un
 
 `Ctrl-P` (anywhere, any mode) opens a list of every command with its shortcut, like VS Code's. Type to search: each word must appear in the command's name, its group or its key (`run`, `format`, `ctrl-u`, `templ`), and the words show in bold blue. `↑` / `↓` (or `Ctrl-P` / `Ctrl-N`, `Ctrl-K` / `Ctrl-J`, `PageUp` / `PageDown`) choose, `Enter` or a click runs it, `Esc` closes the list.
 
-A command does exactly what its key does, where that key works: a cell command (run, format, new cell, conn0…3) acts on the cell you were in (or the cell edited last), a tab command opens its tab first (Schema's Ctrl-O, Template's `a`), a result command works on the result pane. With the completion menu open, `Ctrl-P` still moves up in it. (vim's NORMAL-mode Ctrl-P, "line up", and emacs mode's "previous line" are replaced; use `k` / `↑`.)
+A command does exactly what its key does, where that key works: a cell command (run, format, new cell, conn0…3) acts on the cell you were in (or the cell edited last), a tab command opens its tab first (Schema's Ctrl-O, Bookmark's `a`), a result command works on the result pane. With the completion menu open, `Ctrl-P` still moves up in it. (vim's NORMAL-mode Ctrl-P, "line up", and emacs mode's "previous line" are replaced; use `k` / `↑`.)
 
 ### Switches and the rest
 
@@ -300,9 +300,9 @@ A table or view name after `FROM` (and its comma list), `JOIN`, `INTO` or `UPDAT
 - Not judged, so never underlined: schema-qualified names (`hr.emp`), database links (`emp@remote`), quoted names, table functions (`table(...)`), names a `WITH` clause defines, and `FROM` inside a function call (`extract(year from d)`).
 - Before the connection is up nothing is underlined.
 
-### 5.4 SQL templates
+### 5.4 Bookmarks and SQL templates
 
-Name a query you use often and call it as `@name args…`. Templates are kept in `.dbclidata/templates.json` and managed in the **Template** tab (`Alt-5`, below). The config's `[templates]` (section 7) fill that file the first time; after that the file is what counts.
+The **Bookmark** tab (`Alt-5`, below) keeps the queries you use often, each with an optional memo. Giving a bookmark an `@alias` is optional too: one that has an alias is also a **template**, called as `@alias args…`; one without is only a saved query to put in the prompt. Bookmarks are kept in `.dbclidata/bookmarks.json`. On the first start a `templates.json` from before fills it (each template a bookmark with its alias), or else the config's `[templates]` (section 7); after that the file is what counts.
 
 ```toml
 [templates]
@@ -328,7 +328,7 @@ who = "select * from emp where name = $1"
 | `@a 4` + Tab | Expands the query into the input area without running it. |
 | `@ra` + Tab | Completes the name → `@range `. With several matches a menu shows names and bodies. |
 | `select * from (@a 4` + Tab | Inside a line too: the call from its `@` to the cursor becomes the query, in place → `select * from (select * from t where num <= 4`. The `@` must follow a space, `(`, `,` or `=` (so `emp@dblink` is left alone); a call with the wrong number of arguments inside a line gets the usual Tab. |
-| `@` + Ctrl-O | Lists the templates in the shell. |
+| `@` + Ctrl-O | Lists the templates (the bookmarks with an alias) in the shell. |
 
 - Arguments are **substituted as text** (not driver bind variables). For strings write `'$1'` in the template, or pass `'value'`.
 - The number of arguments must equal the highest `$n` in the template; otherwise nothing runs and the error shows the template.
@@ -336,16 +336,19 @@ who = "select * from emp where name = $1"
 - While typing, the top bar shows `@a (args 1/1): select …`.
 - History keeps the call as typed (`@a 4`).
 
-**Template tab** (`Alt-5`): one line per template, `id @alias body` (the body on one line). The id is given when a template is added and never reused.
+**Bookmark tab** (`Alt-5`): one line per bookmark: `id @alias query` from the left (the alias column only when some bookmark has one, the query on one line, cut to fit) and the memo at the right end. The id is given when a bookmark is added and never reused.
 
 | Key | Does |
 |---|---|
-| `Enter` / `e` | Edits the body in the panel, in place of the list, with the input area's vi keys and SQL colors (NORMAL mode to start; `i`, `A` … to type). The header shows `@alias #id`, and `[+]` while there are unsaved changes |
-| `a` | Adds one: asks for the alias under the panel (Enter answers, Esc drops it, Ctrl-U clears), then opens the editor on an empty body in INSERT mode. It is added on the first `:w`; an empty body adds nothing |
-| `r` | Renames the alias (asked the same way) |
-| `d` `d` | Deletes the template (the first `d` asks, the second deletes) |
-| `i` | Puts `@alias ` at the cursor of the input area: type its arguments, then Tab |
-| `y` | Copies the body |
+| `Enter` | Puts the query in the prompt (the cell edited last): the whole text of an empty cell, else on a line of its own at the cursor; focus moves there in INSERT mode |
+| `i` | For a template, puts `@alias ` at the cursor instead: type its arguments, then Tab. For a plain bookmark, as Enter |
+| `e` | Edits the query in the panel, in place of the list, with the input area's vi keys and SQL colors (NORMAL mode to start; `i`, `A` … to type). The header shows `memo @alias #id`, and `[+]` while there are unsaved changes |
+| `a` | Adds one: asks for the memo, then the `@alias` (both optional: Enter on an empty answer leaves it out; no alias, no template), under the panel (Enter answers, Esc drops it, Ctrl-U clears), then opens the editor on an empty query in INSERT mode. It is added on the first `:w`; an empty query adds nothing |
+| `A`, or `Ctrl-R` in a cell (any mode) | Bookmarks the cell's SQL (for `A`, the cell edited last): asks for the memo and the `@alias`, both optional, and saves it. From a cell, the focus goes back to it |
+| `t` | Sets the `@alias`, making the bookmark a template; an empty answer clears it (a plain bookmark again) |
+| `r` | Changes the memo (an empty answer clears it) |
+| `d` `d` | Deletes the bookmark (the first `d` asks, the second deletes) |
+| `y` | Copies the query |
 
 In the editor (NORMAL mode):
 
@@ -354,7 +357,7 @@ In the editor (NORMAL mode):
 | `:w` (or `Ctrl-S` in any mode) | Saves |
 | `:wq`, `:x`, `ZZ` | Saves and goes back to the list |
 | `:q` | Back to the list; refused while there are unsaved changes |
-| `:q!`, `ZQ` | Back to the list, dropping the changes (a new template is not added) |
+| `:q!`, `ZQ` | Back to the list, dropping the changes (a new bookmark is not added) |
 
 The `:` line opens under the panel: Enter runs it, Esc drops it. Other tabs can be opened meanwhile; `Alt-5` comes back to the editor as it was.
 
@@ -534,7 +537,7 @@ Example: `config.example.toml` in the repository.
 
 ```toml
 [ui]
-panel = "history"               # first panel tab: history | schema | trace | monitor | template | ai
+panel = "history"               # first panel tab: history | schema | trace | monitor | bookmark | ai
 show_panel = true               # false: start with the panel hidden (Ctrl-B shows it)
 editing_mode = "vi"             # input area keys: vi (default) | emacs
 
@@ -547,7 +550,7 @@ effort = "medium"               # low | medium | high | xhigh | max
 api_key = "sk-ant-…"
 # model = "claude-sonnet-5-5"   # this key's own model / effort, else [ai]'s
 
-[templates]                     # called as @name args… (5.4); fills templates.json once
+[templates]                     # called as @name args… (5.4); fills bookmarks.json once
 a = "select * from t where num <= $1"
 
 [abbreviations]                 # added to / overriding the built-in ones
@@ -598,7 +601,7 @@ password = "tiger"
 | `.dbclidata/sessions/<connection>/schema.json` | The Schema tab where it was left (kinds, a kind's objects, an object's details and DDL) and the catalog Ctrl-O collected, so both are back after a restart |
 | `.dbclidata/sessions/<connection>/ai.json` | The AI tab's latest 10 questions and answers (with the context each one sent), brought back by the next start |
 | `.dbclidata/sessions/<connection>/last.json` | That connection's last run: its text, outcome, result rows (up to 1000) and trace |
-| `.dbclidata/templates.json` | The templates (id, alias, body), edited in the Template tab; made from `[templates]` on first start |
+| `.dbclidata/bookmarks.json` | The bookmarks (id, query, optional memo and alias), edited in the Bookmark tab; those with an alias are the templates. Made from an older `templates.json` or `[templates]` on first start |
 | `.dbclidata/words.db` | Word use counts for the gray suggestions, shared by all connections; saved on every run |
 
 Delete `words.db` to reset the ranking, or a connection's folder to forget its history and last run.
@@ -616,7 +619,7 @@ The source is in `src/dbcli/`; `./dbcli` at the repository root runs it with the
 | `src/dbcli/__main__.py` | Command line: which connection to open |
 | `src/dbcli/abbrev.py` | Finding and replacing `$abbreviations` |
 | `src/dbcli/words.py` | The weighted word model, gray suggestions, saving what was learned |
-| `src/dbcli/templates.py` | `@name args` SQL templates |
+| `src/dbcli/templates.py` | Bookmarks and the `@alias args` SQL templates |
 | `src/dbcli/ai.py` | The AI tab: what is sent, the streamed answer, the SQL `i` inserts |
 | `src/dbcli/subscription.py` | `./dbcli subscription list / add / set / delete / show / unset`: the AI tab's keys |
 | `src/dbcli/connections.py` | `./dbcli connection list / add / delete / set` |

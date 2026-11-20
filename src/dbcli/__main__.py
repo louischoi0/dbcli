@@ -62,8 +62,9 @@ def main() -> None:
     from .ui import run  # imported late so a missing dependency gives a readable error
 
     DATA_DIR.mkdir(mode=0o700, exist_ok=True)
-    # kept in templates.json (the Template tab edits them); the config's [templates] fill it once
-    templates = Templates(cfg.templates, path=DATA_DIR / "templates.json")
+    # kept in bookmarks.json (the Bookmark tab edits them; those with an @alias are templates);
+    # a templates.json of before, or else the config's [templates], fill it once
+    templates = Templates(cfg.templates, path=DATA_DIR / "bookmarks.json", legacy=DATA_DIR / "templates.json")
     run([profile], Abbreviations(cfg.abbreviations), cfg.ui, templates, cfg.ai)
 
 

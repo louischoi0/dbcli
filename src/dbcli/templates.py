@@ -8,9 +8,12 @@
 Arguments are inserted as written (text substitution, so the completed query is
 visible). Quotes group an argument and are kept: @b 'kim lee' -> 'kim lee'.
 
-With a file (.dbclidata/templates.json) the templates are kept there, each with an id, and
-the Template panel tab adds, edits and deletes them; every terminal shares the file and picks
-up another's changes. The config's [templates] only fill a file that does not exist yet.
+Templates are bookmarks with an alias. A bookmark is a saved query (the Bookmark panel tab
+keeps the queries you use often), with an optional memo; giving it an `@alias` is optional too,
+and only then can it be called as `@alias args`. With a file (.dbclidata/bookmarks.json) they are kept there,
+each with an id, and the Bookmark tab adds, edits and deletes them; every terminal shares the
+file and picks up another's changes. A templates.json from before bookmarks fills it once, and
+the config's [templates] fill a file that does not exist yet.
 """
 from __future__ import annotations
 
@@ -31,9 +34,19 @@ INLINE_AT_RE = re.compile(r"(?:^|(?<=[\s(,=]))@(?=[A-Za-z_]|$)")
 
 @dataclass
 class Template:
+    """A bookmark: a query with an optional memo, a template when it has an alias."""
     id: int
-    alias: str
+    alias: str | None
     body: str
+    memo: str = ""
+
+    @property
+    def label(self) -> str:
+        """How messages name it: its memo, else its @alias, else #id."""
+        return self.memo or (f"@{self.alias}" if self.alias else f"#{self.id}")
+
+
+KEEP = object()  # update(): leave the alias as it is (None clears it)
 
 
 class TemplateError(Exception):
@@ -41,13 +54,17 @@ class TemplateError(Exception):
 
 
 class Templates:
-    def __init__(self, table: dict[str, str] | None = None, path: Path | None = None):
+    def __init__(self, table: dict[str, str] | None = None, path: Path | None = None,
+                 legacy: Path | None = None):
         self.path = path
         self._entries: list[Template] = []
         self._next_id = 1
         self._mtime: float | None = None
         if path is not None and path.exists():
             self._load()
+        elif path is not None and legacy is not None and legacy.exists():
+            self._load(legacy)  # the templates of before: each a bookmark named by its alias
+            self._save()
         else:
             for alias, body in sorted((table or {}).items()):
                 self._entries.append(Template(self._next_id, alias, body))
@@ -56,20 +73,28 @@ class Templates:
                 self._save()
 
     # -- the file (shared by every terminal) -------------------------------
-    def _load(self) -> None:
+    def _load(self, path: Path | None = None) -> None:
+        path = path or self.path
         try:
-            st = self.path.stat()
-            data = json.loads(self.path.read_text())
+            st = path.stat()
+            data = json.loads(path.read_text())
         except (OSError, ValueError):
             return  # unreadable: keep what is loaded
-        self._mtime = st.st_mtime
-        self._entries = [Template(int(t["id"]), str(t["alias"]), str(t["body"]))
-                         for t in data.get("templates", [])]
+        if path == self.path:
+            self._mtime = st.st_mtime
+        entries = []
+        for t in data.get("bookmarks", data.get("templates", [])):
+            alias = t.get("alias") or None
+            # "name" was the memo's first form, filled with the alias when templates became bookmarks
+            memo = t.get("memo", t.get("name") if t.get("name") != alias else "") or ""
+            entries.append(Template(int(t["id"]), str(alias) if alias else None, str(t["body"]), str(memo)))
+        self._entries = entries
         self._next_id = max([int(data.get("next_id", 1))] + [t.id + 1 for t in self._entries])
 
     def _save(self) -> None:
         data = {"next_id": self._next_id,
-                "templates": [{"id": t.id, "alias": t.alias, "body": t.body} for t in self._entries]}
+                "bookmarks": [{"id": t.id, "memo": t.memo, "alias": t.alias, "body": t.body}
+                              for t in self._entries]}
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
         os.chmod(tmp, 0o600)
@@ -90,41 +115,49 @@ class Templates:
     @property
     def _table(self) -> dict[str, str]:
         self.refresh()
-        return {t.alias: t.body for t in self._entries}
+        return {t.alias: t.body for t in self._entries if t.alias}
 
-    # -- add / edit / delete (the Template tab) ------------------------------
+    # -- add / edit / delete (the Bookmark tab) ------------------------------
     def entries(self) -> list[Template]:
         self.refresh()
         return list(self._entries)
 
-    def check_alias(self, alias: str, keep: int | None = None) -> str | None:
-        """Why the alias cannot be used (None: it can); `keep` is the id being renamed."""
+    def check_alias(self, alias: str | None, keep: int | None = None) -> str | None:
+        """Why the alias cannot be used (None: it can, also no alias at all); `keep` is the id
+        being renamed."""
+        if not alias:
+            return None
         if not NAME_RE.fullmatch(alias):
             return "an alias takes letters, digits, _ and - (and starts with a letter or _)"
         if any(t.alias == alias and t.id != keep for t in self.entries()):
             return f"@{alias} exists already"
         return None
 
-    def add(self, alias: str, body: str) -> Template:
+    def add(self, body: str, memo: str = "", alias: str | None = None) -> Template:
+        """A bookmark; with an alias, a template too."""
         err = self.check_alias(alias)
         if err:
             raise TemplateError(err)
-        t = Template(self._next_id, alias, body)
+        self.refresh()
+        t = Template(self._next_id, alias or None, body, memo.strip())
         self._next_id += 1
         self._entries.append(t)
         self._save()
         return t
 
-    def update(self, id: int, alias: str | None = None, body: str | None = None) -> None:
+    def update(self, id: int, alias=KEEP, body: str | None = None, memo: str | None = None) -> None:
+        """Change a bookmark: `alias=None` makes it a plain bookmark (no template)."""
         self.refresh()
         t = next((t for t in self._entries if t.id == id), None)
         if t is None:
-            raise TemplateError(f"no template #{id}")
-        if alias is not None:
+            raise TemplateError(f"no bookmark #{id}")
+        if alias is not KEEP:
             err = self.check_alias(alias, keep=id)
             if err:
                 raise TemplateError(err)
-            t.alias = alias
+            t.alias = alias or None
+        if memo is not None:
+            t.memo = memo.strip()
         if body is not None:
             t.body = body
         self._save()
@@ -192,6 +225,6 @@ class Templates:
 
     def listing(self) -> str:
         if not self._table:
-            return "-- no templates defined (config file, [templates])"
+            return "-- no templates: give a bookmark an @alias (Bookmark tab, t)"
         width = max(len(n) for n in self._table)
         return "\n".join(f"@{n.ljust(width)} {self.describe(n)}" for n, _ in self.items())
