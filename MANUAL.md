@@ -464,7 +464,7 @@ It is **on from the start**; **F8** (or a click on `autotrace` in the top bar) t
 
 What dbcli sends by itself (catalog reads for completion and underlines, the schema browser, the monitor's own queries, autotrace's helpers) starts with the comment `/* dbcli:bg */`, so it can be told from what you ran. The monitor leaves it out: a session busy with such a statement shows as idle, without its SQL_ID, and Top SQL skips it. Statements from before this mark existed may still show until they age out of the shared pool.
 
-`Alt-4` opens it. **`Ctrl-O`** with the tab focused takes a snapshot; nothing is read otherwise (no refresh by itself). The header says when the snapshot was taken.
+`Alt-4` opens it. **`Ctrl-O`** with the tab focused takes a snapshot; nothing is read otherwise (no refresh by itself). The header says when the snapshot was taken. The last snapshot is kept per connection (`monitor.json`), like the Schema tab: after a restart it is shown again, even before the connection is back, with its date when it is from an earlier day, until Ctrl-O takes a new one.
 
 | Section | From | Shows |
 |---|---|---|
@@ -599,6 +599,7 @@ password = "tiger"
 | `.dbclidata/sessions/<connection>/history` | That connection's queries (the History tab) |
 | `.dbclidata/sessions/<connection>/snapshot.json` | F1's snapshot, read by the next start and then moved to `snapshot.prev.json` |
 | `.dbclidata/sessions/<connection>/schema.json` | The Schema tab where it was left (kinds, a kind's objects, an object's details and DDL) and the catalog Ctrl-O collected, so both are back after a restart |
+| `.dbclidata/sessions/<connection>/monitor.json` | The Monitor tab's last snapshot (and when it was taken), shown again after a restart until Ctrl-O takes a new one |
 | `.dbclidata/sessions/<connection>/ai.json` | The AI tab's latest 10 questions and answers (with the context each one sent), brought back by the next start |
 | `.dbclidata/sessions/<connection>/last.json` | That connection's last run: its text, outcome, result rows (up to 1000) and trace |
 | `.dbclidata/bookmarks.json` | The bookmarks (id, query, optional memo and alias), edited in the Bookmark tab; those with an alias are the templates. Made from an older `templates.json` or `[templates]` on first start |

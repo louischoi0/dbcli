@@ -59,8 +59,8 @@ from .ai import (CELL_REF_RE, Assistant, Chat, Turn, cell_refs, error_message, l
                  user_message)
 from .subscription import activate as subscription_activate, mask as mask_key
 from .config import DATA_DIR, PANEL_TABS, AISettings, Profile, UISettings, load as load_config
-from .store import (history_stamp, history_view, load_chat, load_history, load_last, load_schema, save_chat,
-                    save_last, save_schema,
+from .store import (history_stamp, history_view, load_chat, load_history, load_last, load_monitor, load_schema,
+                    save_chat, save_last, save_monitor, save_schema,
                     save_snapshot,
                     session_dir, take_snapshot)
 from .db import (MAX_ROWS, PAGE_ROWS, changes_schema, error_text, format_table, is_connection_error, is_parse_error,
@@ -1490,6 +1490,7 @@ class App:
         s.file_history = FileHistory(str(s.folder / "history"))
         s.runs = load_history(s.folder / "history")
         self._load_schema(s)
+        self._load_monitor(s)
         s.chat = Chat.from_json(load_chat(s.folder))  # the AI tab's latest questions, from the last run
         s.history = history_view(s.runs, MAX_HISTORY_ITEMS)
         snap = take_snapshot(s.folder)
@@ -2294,9 +2295,14 @@ class App:
         """The last snapshot; a new one only when asked for (Ctrl-O here): dbcli sends nothing
         to the database on its own."""
         s, m = self._session, self._session.watch
-        if s.db is None:
+        if s.db is None and not m.lines:
             return [("not connected", "class:list.note", "")]
-        when = "loading…" if m.loading else m.when.strftime("%H:%M:%S") if m.when else "no snapshot yet"
+        if m.loading:
+            when = "loading…"
+        elif m.when is None:
+            when = "no snapshot yet"
+        else:  # a snapshot of an earlier day (kept from the last run) shows its date
+            when = m.when.strftime("%H:%M:%S" if m.when.date() == dt.date.today() else "%Y-%m-%d %H:%M:%S")
         head = [([("class:schema.title", "Monitor"), ("class:list.note", f"  {when} · Ctrl-O takes a snapshot")],
                  "", "")]
         return head + [(frags, "", "") for frags in m.lines]
@@ -2317,11 +2323,30 @@ class App:
                 sections = await asyncio.get_running_loop().run_in_executor(None, monitor.snapshot, s.db)
             s.watch.lines = schema_lines(sections)
             s.watch.when = dt.datetime.now()
-        except Exception as e:
+            self._save_monitor(s)
+        except Exception as e:  # shown, not kept: the next start has the last good snapshot
             s.watch.lines = [[("class:error", f"  {error_text(e)}")]]
         finally:
             s.watch.loading = False
             self.app.invalidate()
+
+    # -- the monitor tab's last snapshot outlives the terminal: sessions/<name>/monitor.json --
+    def _save_monitor(self, s: Session) -> None:
+        try:
+            save_monitor(s.folder, {"lines": s.watch.lines,
+                                    "when": s.watch.when.isoformat() if s.watch.when else None})
+        except (OSError, TypeError, ValueError) as e:
+            self.say(f"monitor tab not saved: {e}", error=True)
+
+    def _load_monitor(self, s: Session) -> None:
+        d = load_monitor(s.folder)
+        if not d:
+            return
+        try:
+            s.watch.lines = [[tuple(f) for f in line] for line in d.get("lines") or []]
+            s.watch.when = dt.datetime.fromisoformat(d["when"]) if d.get("when") else None
+        except (KeyError, TypeError, ValueError):
+            s.watch = Watch()  # a damaged file: no snapshot
 
     async def spin_loop(self) -> None:
         """Redraw while a cell runs, so its spinner turns."""

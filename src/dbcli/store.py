@@ -181,6 +181,19 @@ def load_schema(folder: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def save_monitor(folder: Path, data: dict) -> None:
+    """The monitor tab's last snapshot: its drawn lines and when it was taken."""
+    _write_json(folder / "monitor.json", data)
+
+
+def load_monitor(folder: Path) -> dict | None:
+    try:
+        data = json.loads((folder / "monitor.json").read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def save_chat(folder: Path, turns: list[dict]) -> None:
     """The AI tab's questions and answers (the caller keeps only the latest ones)."""
     _write_json(folder / "ai.json", {"turns": turns, "saved_at": dt.datetime.now().isoformat(timespec="seconds")})
