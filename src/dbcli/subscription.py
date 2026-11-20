@@ -32,9 +32,9 @@ def _is_header(line: str) -> str | None:
     return m.group(1).strip() if m and not line.lstrip().startswith("#") else None
 
 
-def _section(lines: list[str]) -> tuple[int, int] | None:
-    """[start, end) of the [ai] section's lines (start is its header), or None."""
-    start = next((i for i, l in enumerate(lines) if _is_header(l) == SECTION), None)
+def _section(lines: list[str], section: str = SECTION) -> tuple[int, int] | None:
+    """[start, end) of the section's lines (start is its header), or None."""
+    start = next((i for i, l in enumerate(lines) if _is_header(l) == section), None)
     if start is None:
         return None
     end = next((i for i in range(start + 1, len(lines)) if _is_header(lines[i]) is not None), len(lines))
@@ -46,18 +46,18 @@ def _key_line(lines: list[str], start: int, end: int, key: str) -> int | None:
     return next((i for i in range(start + 1, end) if pat.match(lines[i])), None)
 
 
-def set_value(text: str, key: str, value) -> str:
-    """`key = value` under [ai]: replaced where it is, else added after the section's last
-    setting, else a new [ai] section at the end of the file."""
+def set_value(text: str, key: str, value, section: str = SECTION) -> str:
+    """`key = value` under [ai] (or another section): replaced where it is, else added after
+    the section's last setting, else a new section at the end of the file."""
     lines = text.splitlines(keepends=True) if text else [NEW_FILE]
     if lines and not lines[-1].endswith("\n"):
         lines[-1] += "\n"
     new = f"{key} = {toml_value(value)}\n"
-    sec = _section(lines)
+    sec = _section(lines, section)
     if sec is None:
         if lines and lines[-1].strip():
             lines.append("\n")
-        return "".join(lines + [f"[{SECTION}]\n", new])
+        return "".join(lines + [f"[{section}]\n", new])
     start, end = sec
     at = _key_line(lines, start, end, key)
     if at is not None:
@@ -69,6 +69,11 @@ def set_value(text: str, key: str, value) -> str:
                 last = i
         lines.insert(last + 1, new)
     return "".join(lines)
+
+
+def save_ui_setting(path: Path, key: str, value) -> None:
+    """One [ui] setting, as the Settings tab changes it (the file must still parse)."""
+    _write(path, set_value(_read(path), key, value, section="ui"))
 
 
 def unset_value(text: str, key: str) -> tuple[str, bool]:

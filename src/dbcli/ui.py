@@ -51,14 +51,15 @@ from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.layout.processors import Processor, Transformation
 from prompt_toolkit.layout.utils import explode_text_fragments
 from prompt_toolkit.mouse_events import MouseButton, MouseEventType
-from prompt_toolkit.styles import Style
+from prompt_toolkit.styles import DynamicStyle
 from prompt_toolkit.utils import get_cwidth
 
 from .abbrev import Abbreviations
 from .ai import (CELL_REF_RE, Assistant, Chat, Turn, cell_refs, error_message, last_sql, system_prompt,
                  user_message)
-from .subscription import activate as subscription_activate, mask as mask_key
-from .config import DATA_DIR, PANEL_TABS, AISettings, Profile, UISettings, load as load_config
+from .subscription import activate as subscription_activate, mask as mask_key, save_ui_setting
+from .connections import ConnectionError_
+from .config import CONFIG_PATH, DATA_DIR, PANEL_TABS, AISettings, Profile, UISettings, load as load_config
 from .store import (history_stamp, history_view, load_chat, load_history, load_last, load_monitor, load_schema,
                     save_chat, save_last, save_monitor, save_schema,
                     save_snapshot,
@@ -68,6 +69,7 @@ from .db import (MAX_ROWS, PAGE_ROWS, changes_schema, error_text, format_table, 
 from . import monitor, schema
 from .formatter import NotFormatted, format_sql
 from .statements import statement_at
+from .themes import DEFAULT_THEME, SWATCH, THEMES, style as theme_style
 from .grid import BORDER, HEADER_LINES, Grid, build, copy_text, fit
 from .cell_edit import EditError, build_update, source_table
 from .objects import blank_noise, column_refs, in_table_slot, scan, table_refs
@@ -113,7 +115,8 @@ ANSI_SEQUENCES["\x1b[27;2;9~"] = Keys.BackTab
 # Alt+Enter and Alt+1/2/3/4 arrive as ESC+key in one burst. Parsing them as single keys
 # here (instead of ("escape", key) bindings) keeps a lone Esc instant in vim mode.
 ALT_ENTER = Keys.ControlF23
-ALT_DIGITS = [Keys.ControlF20, Keys.ControlF21, Keys.ControlF22, Keys.ControlF19, Keys.ControlF12, Keys.ControlF11]
+ALT_DIGITS = [Keys.ControlF20, Keys.ControlF21, Keys.ControlF22, Keys.ControlF19, Keys.ControlF12, Keys.ControlF11,
+              Keys.ControlF9]
 ANSI_SEQUENCES["\x1b\r"] = ALT_ENTER
 for _i, _key in enumerate(ALT_DIGITS):
     ANSI_SEQUENCES[f"\x1b{_i + 1}"] = _key
@@ -125,142 +128,7 @@ for _i, _key in enumerate(CONN_KEYS):
     ANSI_SEQUENCES[f"\x1b[{48 + _i};5u"] = _key
 MODIFY_OTHER_KEYS_ON, MODIFY_OTHER_KEYS_OFF = "\x1b[>4;1m", "\x1b[>4;0m"
 
-# One palette for everything: soft grays, sky blue for focus/accents, muted red for trouble.
-SKY, SKY_DEEP = "#8cc8ec", "#5f87af"
-ORANGE = "#ff8700"  # conn0's prompt, a switch that is off, the ids in the panel, the AI prompt>
 AI_PROMPT = "prompt>"  # the AI tab's question line
-TEXT, LIGHT, DIM, FAINT = "#bcbcbc", "#dadada", "#7a7a7a", "#4a4a4a"
-SELECT_BG, MENU_BG, ERROR = "#2d3d48", "#262a2d", "#d78787"
-CELL_BG, STALE = "#1f2a31", "#d7af87"
-
-STYLE = Style.from_dict({
-    "ghost": "#626262",
-    # SQL in the input area: a soft white of its own (not the terminal's default), so the
-    # hints can be whiter than it
-    "input": "#d0d0d0",
-    "keyword": f"{SKY} bold",  # select, from, where …
-    "relation": "#ffd7af bold",  # the tables and views a statement uses: peach
-    "hint": "#ececec bold",  # optimizer hints in /*+ ... */: a touch softer than pure white
-    "hint.frame": "#fadde9 bold",  # the /*+ and */ around them: as other symbols
-    "symbol": "#fadde9 bold",  # , ( ) + - * / | = < > … : a pale pink, bold
-    "hint.arg": "#d7af87",  # what a hint names in its parentheses: aliases, indexes, @query blocks
-    "missing": "#ff6b6b underline",  # a table, view or column the database does not have
-    "relation missing": "#ff6b6b bold underline",  # a missing table stays bold, as relation names are
-    "prompt": f"{SKY} bold",
-    "prompt.dim": FAINT,
-    "prompt.num": DIM,  # `#c0`: the cell's number from the top
-    "prompt.stale": f"{STALE} bold",
-    "prompt.running": "#ffd75f bold",
-    # each connection's label on a cell, its own color: conn0 orange, conn1 green, conn2 sand, conn3 rose
-    "prompt.conn0": ORANGE, "prompt.conn1": "#87d7af", "prompt.conn2": "#d7af87", "prompt.conn3": "#d787af",
-    "cell.focused": f"bg:{CELL_BG}",  # an earlier cell being edited / re-run
-    "note": DIM,
-    "note.cancel": "#ff6b6b bold",  # ✗: a run cancelled with Ctrl-C
-    "note.time": f"{FAINT} italic",  # when a run finished, beside its row count
-    "error": ERROR,
-    "stale": f"{STALE} italic",
-    "border": FAINT,
-    "selected": f"bg:{SELECT_BG}",  # vim visual selection
-    # pane titles and panel tabs: no background, a thin rule instead
-    "title": DIM,
-    "title.focused": f"{SKY} bold",
-    "tab": DIM,
-    "tab.active": f"{LIGHT} bold",
-    "tab.active.focused": f"bg:{SKY} #1c1c1c bold",  # the panel has focus: its tab is filled
-    # lists in the panel
-    "list.active": SKY,
-    "list.cursor": f"bg:{SELECT_BG} {LIGHT}",
-    "palette": "bg:#262626",  # Ctrl-P's command list
-    "palette.group": f"bg:#262626 {DIM}",
-    "palette.key": f"bg:#262626 {ORANGE}",
-    "palette.match": f"bg:#262626 {SKY} bold",
-    "list.note": DIM,
-    "list.id": ORANGE,  # a row's number in the panel: History's run numbers, Bookmark's ids
-    "list.empty": f"{DIM} italic",
-    # the AI tab
-    "ai.you": f"{SKY} bold",  # a question
-    "ai.text": "#d0d0d0",  # an answer's prose
-    "ai.code": FAINT,  # the bar in front of an answer's SQL
-    "ai.prompt": f"{ORANGE} bold",  # `prompt>` in front of the AI question line
-    "ai.ref": f"{SKY} bold",  # `@c0` in a question: that cell's SQL goes along
-    # schema browser
-    "schema.kind": f"{LIGHT} bold",
-    "schema.title": f"{SKY} bold",
-    "schema.back": SKY,
-    "schema.invalid": ERROR,
-    "schema.ddl": "",
-    # top bar
-    "top": TEXT,
-    "top.name": f"{LIGHT} bold",
-    "top.sep": FAINT,
-    "top.online": SKY,
-    "top.connected": "#a6d189 bold",  # the `connected` of "<name> connected": green, as numbers are
-    "top.offline": ERROR,
-    "top.wait": DIM,
-    "top.dim": DIM,
-    "top.error": ERROR,
-    "top.mode": f"{SKY} bold",
-    "top.off": f"{ORANGE} bold",  # the `off` of autocommit / autotrace
-    # result table
-    "grid.border": FAINT,
-    "grid.header": f"{SKY} bold",
-    "grid.row": "",
-    "grid.row.alt": "bg:#1f2326",
-    "grid.null": f"{DIM} italic",
-    # values by type
-    "grid.number": "#a6d189",
-    "grid.text": "#e5c890",
-    "grid.date": "#ca9ee6",
-    "grid.bool": "#ef9f76",
-    "grid.bytes": "#81c8be",
-    # the header's N / VCH / T …: its values' color, toned down
-    "grid.type": f"nobold {DIM}",
-    "grid.type.number": "nobold #6f8a62",
-    "grid.type.text": "nobold #94845f",
-    "grid.type.date": "nobold #85699a",
-    "grid.type.bytes": "nobold #5a8780",
-    "grid.type.bool": "nobold #9c6a50",
-    "grid.cursor": "bg:#34495a",  # the selected row: a background only, values keep their colors
-    "grid.cell": f"bg:{SKY_DEEP} #ffffff bold",  # the selected cell: white on blue, the strongest mark
-    # completion menu and scrollbars in the same tones
-    "completion-menu": f"bg:{MENU_BG} {TEXT}",
-    "completion-menu.completion.current": f"bg:{SKY_DEEP} #ffffff",
-    "completion-menu.meta.completion": f"bg:{MENU_BG} {DIM}",
-    "completion-menu.meta.completion.current": f"bg:{SKY_DEEP} {LIGHT}",
-    # trace tab: one color per kind of plan operation
-    "op": TEXT,
-    "op.statement": f"{LIGHT} bold",
-    "op.full": "#ff7b72 bold",  # TABLE ACCESS FULL
-    "op.indexfull": "#f0a35e",  # INDEX FULL / FAST FULL / SKIP SCAN
-    "op.index": "#7ee787",  # INDEX RANGE / UNIQUE SCAN: index lookup
-    "op.rowid": "#56d4dd",  # TABLE ACCESS BY INDEX ROWID: key lookup
-    "op.nl": "#79a8ff",  # NESTED LOOPS
-    "op.hash": "#e3c35a",  # HASH JOIN
-    "op.merge": "#d2a8ff",  # MERGE JOIN / SORT JOIN
-    "op.sort": "#ff9bce",  # SORT, GROUP BY, WINDOW
-    "op.parallel": "#a5b4fc",
-    "trace.bar": SKY,
-    "trace.title": f"{SKY} bold",
-    "trace.subtitle": f"{LIGHT} bold",
-    "trace.id": DIM,
-    "trace.star": f"{STALE} bold",
-    "trace.rail": FAINT,
-    "trace.name": f"{LIGHT}",
-    "trace.dim": DIM,
-    "trace.value": TEXT,
-    "trace.strong": f"{LIGHT} bold",
-    "trace.key": f"{SKY} bold",
-    "trace.warn": f"{STALE} bold",
-    "trace.statname": TEXT,
-    "trace.ivory": "#eee8d0 bold",  # recursive calls, consistent gets, rows processed (the names)
-    "trace.ivory.value": f"{ORANGE} bold",  # … and their values
-    "trace.rowlabel": f"{ORANGE} bold",  # `actual` in the actual plan
-    "trace.access": "#7ee787 bold",
-    "trace.filter": "#e3c35a bold",
-    "scrollbar.background": "bg:#2a2a2a",
-    "scrollbar.button": f"bg:{SKY_DEEP}",
-    "scrollbar.arrow": SKY,
-})
 
 STATE_LABEL = {"idle": ("not connected", "class:top.dim"), "connecting": ("connecting…", "class:top.wait"),
                "online": ("online", "class:top.online"), "offline": ("offline", "class:top.offline"),
@@ -1280,6 +1148,8 @@ class App:
         self.profiles = profiles
         self.abbrevs = abbrevs
         self.templates = templates
+        self.theme = ui.theme if ui.theme in THEMES else DEFAULT_THEME
+        self.style = theme_style(self.theme)  # the app draws with whatever this is (Settings tab: a theme)
         self.words = WordModel(DATA_DIR / "words.db")
         self.completer = WordCompleter(self.words, self.templates)
         self.words.context = self._completion_context
@@ -1311,6 +1181,7 @@ class App:
                                        "e": self._template_edit_current, "r": self._template_rename,
                                        "t": self._template_alias, "d": self._template_delete,
                                        "i": self._template_insert, "y": self._template_copy}),
+            "settings": PanelTab("settings", "Settings", self._settings_items, self._settings_pick),
             "ai": PanelTab("ai", "AI", self._ai_items, self._ai_pick,
                            keys={"a": self._ai_prompt, "i": self._ai_insert, "y": self._ai_copy,
                                  "c": self._ai_clear, "c-c": self._ai_stop}),
@@ -1384,7 +1255,7 @@ class App:
         # written; otherwise prompt_toolkit's 256 colors, which round them to the nearest entry
         depth = ColorDepth.DEPTH_24_BIT if os.environ.get("COLORTERM") in ("truecolor", "24bit") else None
         self.app = Application(layout=Layout(root, focused_element=first), color_depth=depth,
-                               key_bindings=self._global_bindings(), style=STYLE,
+                               key_bindings=self._global_bindings(), style=DynamicStyle(lambda: self.style),
                                full_screen=True, mouse_support=True,
                                editing_mode=EditingMode.VI if self.vi else EditingMode.EMACS,
                                cursor=ModalCursorShapeConfig(),  # block in normal, bar in insert
@@ -2100,6 +1971,51 @@ class App:
             self.say(f"{e['label']}: " + ("not added" if e["id"] is None else "changes dropped"))
         elif cmd:
             self.say(f"not an editor command: :{cmd} (w, wq, x, q, q!)", error=True)
+
+    # -- settings: several settings in one tab; for now the color theme ------------------
+    def _settings_rows(self) -> list[tuple[str, str]]:
+        """What each line of the tab is: ("head" | "section" | "theme", value)."""
+        return [("head", ""), ("section", "Theme")] + [("theme", name) for name in THEMES]
+
+    def _settings_items(self):
+        out = []
+        width = max(len(t.title) for t in THEMES.values()) + 2
+        for kind, value in self._settings_rows():
+            if kind == "head":
+                out.append(([("class:schema.title", "Settings"),
+                             ("class:list.note", "  Enter applies · saved to config.toml [ui]")], "", ""))
+            elif kind == "section":
+                out.append(([("class:schema.kind", value)], "", ""))
+            else:
+                t, on = THEMES[value], value == self.theme
+                frags = [("class:list.active" if on else "class:list.note", " ● " if on else " ○ "),
+                         ("class:schema.title" if on else "", f"{t.title:<{width}}")]
+                frags += [(f"class:swatch.{t.name}.{k}", "  ") for k in SWATCH]
+                frags.append(("class:list.note", f"  {t.about}"))
+                out.append((frags, "", "default" if t.name == DEFAULT_THEME else ""))
+        return out
+
+    def _settings_pick(self, i: int) -> None:
+        rows = self._settings_rows()
+        if not 0 <= i < len(rows):
+            return
+        kind, value = rows[i]
+        if kind == "theme":
+            self.set_theme(value)
+
+    def set_theme(self, name: str) -> None:
+        """Draw with the theme now, and keep it for the next start ([ui] theme in config.toml)."""
+        if name not in THEMES:
+            return
+        self.theme, self.style = name, theme_style(name)
+        self.app.invalidate()
+        try:
+            save_ui_setting(self.ai_settings.config_path or CONFIG_PATH, "theme", name)
+        except (OSError, ConnectionError_) as e:
+            self.say(f"theme {THEMES[name].title} on, but not saved: {e}", error=True)
+            return
+        self._ai_mtime = self._config_mtime()  # our own write: nothing for the AI tab to reload
+        self.say(f"theme: {THEMES[name].title}")
 
     # -- AI: questions about SQL to Claude, with this session's context ---------------------
     # no key yet: the subscriptions to pick from, or how to add one
@@ -2930,7 +2846,7 @@ class App:
                      ("class:top.mode" if on else "class:top.off", "on" if on else "off", clicked(self.toggle_autotrace)),
                      ("class:top.dim", " F8")]
         left += [sep, ("class:top.dim", f"{s.profile.type} · {s.profile.target()}")]
-        right = " Ctrl-P commands · Ctrl-O run · Ctrl-N new cell · Ctrl-0~2 / Ctrl-W 0~3 conn · F4 statement · Ctrl-C cancel · ↑↓ cells · Alt-1~6 panel tab · Alt-8 prompt · Alt-9 panel · Alt-0 result · Ctrl-W hjkl move · F1 save+quit · Ctrl-Q quit "
+        right = " Ctrl-P commands · Ctrl-O run · Ctrl-N new cell · Ctrl-0~2 / Ctrl-W 0~3 conn · F4 statement · Ctrl-C cancel · ↑↓ cells · Alt-1~7 panel tab · Alt-8 prompt · Alt-9 panel · Alt-0 result · Ctrl-W hjkl move · F1 save+quit · Ctrl-Q quit "
         used = sum(get_cwidth(f[1]) for f in left)
         room = get_app().output.get_size().columns - used - get_cwidth(right)
         return left + ([("", " " * room), ("class:top.dim", right)] if room > 0 else [])
@@ -2984,7 +2900,7 @@ class App:
             event.app.layout.focus_previous()
 
         for i in range(len(PANEL_TABS)):
-            @kb.add(ALT_DIGITS[i])  # Alt-1..5: open that panel tab
+            @kb.add(ALT_DIGITS[i])  # Alt-1..7: open that panel tab
             def _(event, i=i):
                 self.show_panel = True
                 self.panel.select(i)

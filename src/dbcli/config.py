@@ -49,7 +49,7 @@ class Profile:
         return self.options.get("password")
 
 
-PANEL_TABS = ("history", "schema", "trace", "monitor", "bookmark", "ai")  # Alt-1..6, in this order
+PANEL_TABS = ("history", "schema", "trace", "monitor", "bookmark", "ai", "settings")  # Alt-1..7, in this order
 
 
 @dataclass
@@ -57,6 +57,7 @@ class UISettings:
     panel: str = "history"  # which tab of the right panel is shown first
     show_panel: bool = True
     editing_mode: str = "vi"  # vi | emacs  (input area key bindings)
+    theme: str = "sky"  # the color theme (themes.THEMES): sky | forest | ember | dusk
 
 
 AI_EFFORTS = ("low", "medium", "high", "xhigh", "max")
@@ -131,9 +132,13 @@ def load(path: Path = CONFIG_PATH) -> Config:
         panel = "bookmark"
     ui = UISettings(panel=panel,
                     show_panel=bool(ui_data.get("show_panel", True)),
-                    editing_mode=ui_data.get("editing_mode", "vi"))
+                    editing_mode=ui_data.get("editing_mode", "vi"),
+                    theme=str(ui_data.get("theme", "sky")))
     if ui.editing_mode not in ("vi", "emacs"):
         raise ConfigError('[ui] editing_mode must be "vi" or "emacs"')
+    from .themes import THEMES
+    if ui.theme not in THEMES:
+        raise ConfigError(f"[ui] theme must be one of {', '.join(THEMES)}")
     if ui.panel not in PANEL_TABS:
         raise ConfigError(f"[ui] panel must be one of {', '.join(PANEL_TABS)}")
     templates = data.get("templates", {})

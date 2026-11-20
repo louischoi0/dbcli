@@ -2,9 +2,10 @@
 # Add new connections at the bottom: the last [connections.*] is the default one at startup.
 
 [ui]
-panel = "history"         # first panel tab: history | schema | trace | monitor | bookmark | ai
+panel = "history"         # first panel tab: history | schema | trace | monitor | bookmark | ai | settings
 show_panel = true
 editing_mode = "vi"       # input area keys: vi (default) | emacs
+theme = "sky"             # colors: sky (default) | forest | ember | dusk (the Settings tab, Alt-7, sets it)
 
 [templates]               # `@a 4` -> select * from t where num <= 4
 a = "select * from t where num <= $1"

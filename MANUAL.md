@@ -90,7 +90,7 @@ The top bar, the shell on the left, the panel on the right, and the result pane 
 |---|---|
 | Top bar | From the left: vim mode, connection state (●), connection name, online state, the latest message, the **autocommit** and **autotrace** switches with their keys, and the target. A narrow terminal cuts from the right, so the important parts come first. The right end lists the main keys. |
 | Shell | The `> ` input area works **like a text editor**: Enter is a new line and **Ctrl-O** runs. A cell of several lines ends with `_ ` on its last line, so `>` … `_` mark where each block starts and ends. The shell keeps each statement run and a short outcome (`(2 rows)`, `OK, 3 row(s) affected`, errors). |
-| Panel | One panel with the **History / Schema / Trace / Monitor / Bookmark / AI** tabs (`Alt-1` to `Alt-6`). The panel is as wide as a plan needs on every tab (at most 96 columns, half the screen), so switching tabs never moves the shell. The first tab shown is `[ui] panel` (section 7). |
+| Panel | One panel with the **History / Schema / Trace / Monitor / Bookmark / AI / Settings** tabs (`Alt-1` to `Alt-7`). The panel is as wide as a plan needs on every tab (at most 96 columns, half the screen), so switching tabs never moves the shell. The first tab shown is `[ui] panel` (section 7). |
 | Result | The latest result as a **boxed table**. Each header cell has the column name on the left and its type on the right (`N` number, `VCH` varchar2, `CH` char, `CL` clob, `BB` blob, `R` raw, `D` date, `T` timestamp, `TZ` timestamp with time zone, `RID` rowid …; Oracle only), the type in a toned-down shade of its values' color. Values are colored by the column's type (numbers green, text yellow, dates lavender, binary teal, booleans orange), numbers right-aligned, NULL dimmed, every other row shaded. Cells are cut at 40 columns with `…`, line breaks show as `↵`. |
 
 Connection state in the top bar:
@@ -111,9 +111,10 @@ Panel tabs:
 | Monitor | Sessions, blocking, locked objects, top SQL and wait events, read when you press Ctrl-O in the tab (section 6.3). |
 | Bookmark | Saved queries (section 5.4), one to a line: id, `@alias` (a template), query, and the memo at the right end. Enter puts it in the prompt, `e` edits it right in the panel (vi keys, `:wq`); `a` adds, `A` (or `Ctrl-R` in a cell) bookmarks the current cell, `t` sets the alias, `d` deletes. |
 | AI | Questions about SQL to Claude, answered in the tab (section 6.4). |
+| Settings | Settings in one place (section 6.5); for now the color theme. |
 | Trace | With autotrace on (Oracle): the run's **estimated plan** (EXPLAIN PLAN + DBMS_XPLAN), **actual plan** (DISPLAY_CURSOR `ALLSTATS LAST`) and **session statistics**, drawn as a tree (section 6.1). It shows the trace of the cell focused in the shell. |
 
-Colors are soft grays with sky blue: the focused pane's title (the selected tab in the panel), the prompt, table headers and `online` are sky blue; `connected` in the top bar's message is green; only offline and errors are red. Orange marks `conn0` in a cell's prompt, an `off` switch in the top bar (`autocommit off`, `autotrace off`) and the numbers in the panel (History's run numbers, Bookmark's ids). Ctrl-B hides the panel so the shell takes the full width.
+Colors follow the theme (Settings tab, `Alt-7`); the default, **Sky**, is soft grays with sky blue: the focused pane's title (the selected tab in the panel), the prompt, table headers and `online` are sky blue; `connected` in the top bar's message is green; only offline and errors are red. Orange marks `conn0` in a cell's prompt, an `off` switch in the top bar (`autocommit off`, `autotrace off`) and the numbers in the panel (History's run numbers, Bookmark's ids). Ctrl-B hides the panel so the shell takes the full width.
 The layout follows the terminal's size. Panes, tabs, list items and the two switches in the top bar can be clicked.
 
 ## 4. Keys
@@ -168,7 +169,7 @@ After a run it returns to INSERT mode, ready for the next query.
 | `Alt-8` | The prompt (the input cell), from any pane, in INSERT mode |
 | `Alt-9` | The side panel, on the tab it shows (shown again if Ctrl-B hid it) |
 | `Alt-0` | The result pane |
-| `Alt-1` … `Alt-6` | Opens the panel on History / Schema / Trace / Monitor / Bookmark / AI |
+| `Alt-1` … `Alt-7` | Opens the panel on History / Schema / Trace / Monitor / Bookmark / AI / Settings |
 | `Ctrl-W h` / `j` / `k` / `l` | The pane to the left / below / above / right |
 | `Ctrl-W` + arrow, `Ctrl-W Ctrl-H/J/K/L` | The same |
 | `Ctrl-W w`, `Ctrl-W Ctrl-W` | The next pane |
@@ -199,7 +200,7 @@ Editing works on the result of a query on one plain table (no join, subquery, un
 | Key | Does |
 |---|---|
 | `→` / `←`, `l` / `h`, `Tab` / `Shift-Tab` | Next / previous tab (wrapping around) |
-| `1` … `6` | History / Schema / Trace / Monitor / Bookmark / AI |
+| `1` … `7` | History / Schema / Trace / Monitor / Bookmark / AI / Settings |
 | `j` / `k`, `↓` / `↑` | Moves the selection |
 | `g` / `G`, `Home` / `End` | Top / bottom |
 | `PageUp` / `PageDown` | Scroll the panel a screen at a time, **wherever the focus is** (the prompt, the result pane, the panel) |
@@ -530,6 +531,19 @@ Each record in the shell is an editable **cell** (like a notebook). The bottom c
 - The key: the active subscription's (`./dbcli subscription add`, section 2), else `[ai] api_key`, else `ANTHROPIC_API_KEY`. **With none of these** the tab lists the saved subscriptions: Enter on one makes it the active one (saved as `[ai] subscription`). With no subscription at all it says to run `./dbcli subscription add` in a terminal; a subscription added or picked there shows in the tab without a restart. `a` still asks, for an `ant auth login` profile. It needs the Anthropic SDK: `.venv/bin/pip install -r requirements.txt` (or `.venv/bin/pip install anthropic`); without it the tab says so and the rest of dbcli works as before.
 - Each question is billed to that key. The catalog is sent as a cached prefix, so repeated questions with the same catalog cost less.
 
+### 6.5 Settings tab
+
+`Alt-7` opens it: settings kept in one tab, saved to `[ui]` in `config.toml` (the rest of the file is left as it is). For now it holds the **theme**. `j` / `k` move, Enter applies the theme under the cursor at once (● marks the one in use) and saves it as `[ui] theme`, so the next start has it too. Each line shows the theme's colors: accent, second accent, numbers, text, dates, tables.
+
+| Theme | Colors |
+|---|---|
+| `sky` (default) | Soft grays with sky blue, orange for ids and switches that are off |
+| `forest` | Greens and teal, amber accents |
+| `ember` | Warm amber and copper, teal accents |
+| `dusk` | Lavender and violet, pink accents |
+
+Every theme is for a dark terminal: dbcli draws no background of its own, only its marks (the selection, the focused cell, alternate result rows). The trace tab's plan operations keep their colors in every theme, since each means a kind of operation.
+
 ## 7. Config file
 
 Where: `.dbclidata/config.toml` in the repository (the `.dbclidata/` next to `./dbcli`).
@@ -537,9 +551,10 @@ Example: `config.example.toml` in the repository.
 
 ```toml
 [ui]
-panel = "history"               # first panel tab: history | schema | trace | monitor | bookmark | ai
+panel = "history"               # first panel tab: history | schema | trace | monitor | bookmark | ai | settings
 show_panel = true               # false: start with the panel hidden (Ctrl-B shows it)
 editing_mode = "vi"             # input area keys: vi (default) | emacs
+theme = "sky"                   # colors: sky (default) | forest | ember | dusk (the Settings tab sets it)
 
 [ai]                            # the AI tab (6.4); all optional
 model = "claude-opus-5-5"
@@ -620,6 +635,7 @@ The source is in `src/dbcli/`; `./dbcli` at the repository root runs it with the
 | `src/dbcli/__main__.py` | Command line: which connection to open |
 | `src/dbcli/abbrev.py` | Finding and replacing `$abbreviations` |
 | `src/dbcli/words.py` | The weighted word model, gray suggestions, saving what was learned |
+| `src/dbcli/themes.py` | The color themes and the style made from one |
 | `src/dbcli/templates.py` | Bookmarks and the `@alias args` SQL templates |
 | `src/dbcli/ai.py` | The AI tab: what is sent, the streamed answer, the SQL `i` inserts |
 | `src/dbcli/subscription.py` | `./dbcli subscription list / add / set / delete / show / unset`: the AI tab's keys |
