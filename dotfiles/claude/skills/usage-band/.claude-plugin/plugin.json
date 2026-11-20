@@ -1,0 +1,6 @@
+{
+  "name": "usage-band",
+  "version": "0.1.0",
+  "description": "프롬프트 창 아래 힌트 줄 옆에 현재 모델(모델별 색)과 사용 한도(5시간·주간)의 사용률과 리셋까지 남은 시간을 한 줄로 보여 줍니다.",
+  "types": "./types/index.d.ts"
+}
