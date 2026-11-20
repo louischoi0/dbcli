@@ -8,7 +8,8 @@ editing, notebook-like cells, Oracle autotrace and an AI assistant panel.
 - **vim keys** in the input area (emacs mode optional), `Ctrl-U` to format SQL, `Tab` completion
   for tables, columns, Oracle hints, `$abbreviations` and `@template` calls.
 - **Result grid**: row / cell selection, sort by column, resize columns with the mouse, copy a cell
-  or a row to the clipboard (OSC 52 / tmux).
+  or a row to the clipboard (OSC 52 / tmux), and edit a cell in place: `i`, change it, `Enter` runs the
+  `UPDATE` in a new cell.
 - **Side panel** with tabs: History, Schema browser, Trace (execution plan with E-Rows vs A-Rows,
   statistics), Monitor (sessions), Template and AI.
 - **Autotrace** (Oracle, on by default): every run shows `DBMS_XPLAN.DISPLAY_CURSOR` (ALLSTATS LAST)

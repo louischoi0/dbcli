@@ -69,6 +69,7 @@ from . import monitor, schema
 from .formatter import NotFormatted, format_sql
 from .statements import statement_at
 from .grid import BORDER, HEADER_LINES, Grid, build, copy_text
+from .cell_edit import EditError, build_update, source_table
 from .objects import blank_noise, column_refs, in_table_slot, scan, table_refs
 from .oracle_hints import HINT_WEIGHT, HINTS
 from .panes import neighbor
@@ -853,7 +854,12 @@ class CommandPalette:
 
 
 class ResultGrid:
-    """Bottom pane: a result as a box table; j/k rows, h/l columns when focused."""
+    """Bottom pane: a result as a box table; j/k rows, h/l columns when focused.
+
+    `i` / `a` / Enter edit the selected cell's value on a line under the table (`I` with the
+    cursor at its start, `c` from empty), in vim's INSERT mode; Enter there hands the text to
+    `on_edit` (the app runs the UPDATE), Esc in NORMAL mode or Ctrl-C drops it.
+    """
 
     EMPTY = ("class:list.empty", " Query results show up here as a table")
 
@@ -861,6 +867,9 @@ class ResultGrid:
         self.grid: Grid | None = None
         self.on_copy: Callable[[str, str], None] = lambda text, what: None  # set by the app
         self.on_near_end: Callable[[], None] = lambda: None  # set by the app: fetch more rows
+        self.on_edit: Callable[[int, int, str], None] = lambda row, col, text: None  # set by the app
+        self.on_say: Callable[[str], None] = lambda message: None  # set by the app: an error line
+        self.editing: tuple[int, int] | None = None  # (row, column) whose value is being edited
         self._drag: tuple[int, int, int] | None = None  # (column, where the drag began, its width then)
         self.placeholder = self.EMPTY
         self.row = self.col = 0
@@ -878,12 +887,67 @@ class ResultGrid:
         kb.add("Y")(lambda e: self.copy(row=True))  # the selected row, tab-separated
         kb.add("0")(lambda e: self._move(0, -10**9))
         kb.add("$")(lambda e: self._move(0, 10**9))
+        kb.add("enter")(kb.add("i")(kb.add("a")(lambda e: self.start_edit())))
+        kb.add("I")(lambda e: self.start_edit(at_end=False))
+        kb.add("c")(lambda e: self.start_edit(clear=True))
         self.window = Window(
             ScrollingControl(self._fragments, focusable=True, show_cursor=False, key_bindings=kb,
                              get_cursor_position=self._cursor, move=lambda d: self._move(d, 0),
                              on_mouse=self._mouse),
             wrap_lines=False, height=self._height,
             right_margins=[ScrollbarMargin(display_arrows=True)])
+
+        ekb = KeyBindings()
+        ekb.add("enter")(lambda e: self._submit_edit())
+        ekb.add("c-c")(lambda e: self.cancel_edit())
+        # Esc in INSERT mode goes to NORMAL as in vim; in NORMAL (or emacs mode) it drops the edit
+        ekb.add("escape", filter=vi_navigation_mode | emacs_insert_mode)(lambda e: self.cancel_edit())
+        self.edit_buffer = Buffer(multiline=False)
+        self.edit_window = Window(BufferControl(buffer=self.edit_buffer, key_bindings=ekb),
+                                  height=1, get_line_prefix=lambda lineno, wrap: self._edit_prefix(),
+                                  style="class:input")
+        self.container = HSplit([self.window, ConditionalContainer(
+            self.edit_window, filter=Condition(lambda: self.editing is not None))])
+
+    def has_focus(self) -> bool:
+        return get_app().layout.current_window in (self.window, self.edit_window)
+
+    def start_edit(self, at_end: bool = True, clear: bool = False) -> None:
+        """Edit the selected cell's value on the line under the table (NULL shows as NULL)."""
+        if self.grid is None or not self.grid.rows:
+            return
+        v = self.grid.value(self.row, self.col)
+        if isinstance(v, (bytes, bytearray)):
+            self.on_say("binary values cannot be edited here")
+            return
+        text = "" if clear else "NULL" if v is None else copy_text(v)
+        self.editing = (self.row, self.col)
+        self.edit_buffer.reset(Document(text, len(text) if at_end else 0))  # its own undo, from here
+        app = get_app()
+        app.layout.focus(self.edit_window)
+        if app.editing_mode == EditingMode.VI:
+            app.vi_state.input_mode = InputMode.INSERT
+
+    def cancel_edit(self) -> None:
+        self.editing = None
+        app = get_app()
+        if app.layout.current_window is self.edit_window:
+            app.layout.focus(self.window)
+
+    def _submit_edit(self) -> None:
+        if self.editing is None:
+            return
+        (row, col), text = self.editing, self.edit_buffer.text
+        self.cancel_edit()
+        if get_app().editing_mode == EditingMode.VI:
+            get_app().vi_state.input_mode = InputMode.NAVIGATION
+        self.on_edit(row, col, text)
+
+    def _edit_prefix(self):
+        if self.grid is None or self.editing is None:
+            return []
+        name = self.grid.source[0][self.editing[1]]
+        return [("class:prompt.num", f" row {self.editing[0] + 1} "), ("class:prompt", f"{name} = ")]
 
     @staticmethod
     def _height() -> Dimension:
@@ -943,6 +1007,8 @@ class ResultGrid:
 
     def show(self, grid: Grid | None, placeholder: tuple[str, str] | None = None) -> None:
         self._drag = None
+        if self.editing is not None and grid is not self.grid:
+            self.cancel_edit()  # another result: the edit was for the one before
         self.grid, self.row, self.col = grid, 0, 0
         self.placeholder = placeholder or self.EMPTY
 
@@ -980,8 +1046,7 @@ class ResultGrid:
         if not self.grid:
             style, text = self.placeholder
             return [(style, " " + text.replace("\n", "\n "))]
-        focused = get_app().layout.current_window is self.window
-        cursor_line = HEADER_LINES + self.row if focused and self.grid.rows else -1
+        cursor_line = HEADER_LINES + self.row if self.has_focus() and self.grid.rows else -1
         out = []
         for i, line in enumerate(self.grid.lines):
             if i == cursor_line:
@@ -1006,6 +1071,9 @@ class Cell:
     def __init__(self, app: "App", session: "Session", note: tuple[str, str] | None = None):
         self.app, self.session = app, session
         self.ran_text: str | None = None  # input as it was last executed
+        self.ran_sql: str | None = None  # the statement its result came from (F4 / O run a part of the text)
+        self.affected: int | None = None  # rows a DML changed on its last run, None after an error
+        self.keep_pane = False  # an UPDATE from the result grid: its outcome does not replace the result shown
         self.output: list[tuple[str, str]] = [note] if note else []
         self.grid: Grid | None = None
         self.trace: list[str] | None = None  # autotrace lines of the last run, if it was traced
@@ -1274,6 +1342,8 @@ class App:
         self.results = ResultGrid()
         self.results.on_copy = self.copy_to_clipboard
         self.results.on_near_end = self.fetch_more
+        self.results.on_edit = self.edit_value
+        self.results.on_say = lambda message: self.say(message, error=True)
         results_title = Window(FormattedTextControl(self._results_title), height=1, char="─",
                                style="class:border")
 
@@ -1285,7 +1355,7 @@ class App:
         self.palette = CommandPalette(self._commands(), self._run_command)
         self.palette.on_close = self._palette_closed
         self._palette_back = None  # the window focused when the palette opened
-        root = FloatContainer(HSplit([top_bar, top, results_title, self.results.window]), floats=[
+        root = FloatContainer(HSplit([top_bar, top, results_title, self.results.container]), floats=[
             Float(top=2, content=self.palette.container),
             Float(xcursor=True, ycursor=True, content=CompletionsMenu(max_height=10)),
         ])
@@ -1589,6 +1659,24 @@ class App:
                 s.edit_cell = s.input_cell
         if hasattr(self, "app"):  # not yet while the last run is restored at start
             self.app.invalidate()
+
+    def _append_cell(self, s: Session, cell: Cell) -> None:
+        """Add a cell at the bottom of the shell, after every run: it becomes the bottom (input)
+        cell, unless that one is still empty and unrun, which then stays the bottom one."""
+        bottom = s.input_cell
+        if bottom is not None and not bottom.buffer.text.strip() and not bottom.has_run:
+            self._insert_cell(s, cell)
+            return
+        s.cells.append(cell)
+        s.stack.children.append(cell.container)
+        s.input_cell = cell
+        while len(s.cells) > MAX_CELLS:
+            old = s.cells.pop(0)
+            s.stack.children.pop(0)
+            self.cell_of.pop(old.window, None)
+            if s.edit_cell is old:
+                s.edit_cell = s.input_cell
+        self.app.invalidate()
 
     def set_conn(self, i: int) -> None:
         """Put the focused cell on conn<i>."""
@@ -2668,7 +2756,7 @@ class App:
 
     def _results_title(self):
         s = self._session
-        focused = get_app().layout.current_window is self.results.window
+        focused = self.results.has_focus()
         shown = s.shown
         style = "class:title.focused" if focused else "class:title"
         out = [("class:border", "──"), (style, f" Result · {s.profile.name}")]
@@ -2726,9 +2814,11 @@ class App:
 
     def _vi_mode(self) -> str:
         cell = self._focused_cell()
-        if not self.vi or cell is None:
+        editing = get_app().layout.current_window is self.results.edit_window
+        if not self.vi or (cell is None and not editing):
             return ""
-        if cell.buffer.selection_state:
+        buf = self.results.edit_buffer if cell is None else cell.buffer
+        if buf.selection_state:
             return "VISUAL"
         return {InputMode.INSERT: "INSERT", InputMode.NAVIGATION: "NORMAL",
                 InputMode.REPLACE: "REPLACE", InputMode.REPLACE_SINGLE: "REPLACE"}.get(
@@ -3339,6 +3429,7 @@ class App:
     async def run_cell(self, s: Session, cell: Cell, text: str) -> None:
         """Run a cell's text and store the outcome on the cell (in place, also for re-runs)."""
         cell.running = True
+        cell.affected = None
         self._drop_pager(cell)  # a re-run: the earlier result's cursor goes
         self.app.invalidate()
         pre: list[tuple[str, str]] = []
@@ -3418,11 +3509,13 @@ class App:
                          (", more ↓)" if res.more else ", first 1000 shown)" if res.truncated else ")")
                 if res.more:
                     self._keep_pager(s, cell, res.more)
+                cell.ran_sql = sql
                 first = " ".join(sql.split()).rstrip(";")
                 title = f"{first[:60]}{'…' if len(first) > 60 else ''} {footer}"
                 self._finish(s, cell, text, pre + [("class:note", footer), ("class:note.time", f"  {stamp}")], build(res.columns, res.rows, res.kinds, res.types), title,
                              trace, (res.columns, res.rows, res.kinds, res.types))
             else:
+                cell.affected = res.rowcount
                 self._finish(s, cell, text, pre + [("class:note", format_table(res)), ("class:note.time", f"  {stamp}")],
                              trace=trace)
             if trace is not None:  # like SQL*Plus, the trace shows up by itself
@@ -3443,10 +3536,68 @@ class App:
         cell.data = data
         cell.ran_text = text
         cell.version += 1
+        if cell.keep_pane:  # the result it changed stays the one shown (and the last run)
+            return
         s.last_run = cell
         self._save_last(s, cell)
         if self._focused_cell() is None or self._focused_cell().is_input or self._focused_cell() is cell:
             s.shown = cell  # show it now unless the user moved on to another history cell
+
+    # -- a value edited in the result grid: an UPDATE in a cell of its own ----------
+    def edit_value(self, row: int, col: int, text: str) -> None:
+        s, grid = self._session, self.results.grid
+        source = s.shown
+        if grid is None or source is None or source.grid is not grid or not source.has_run:
+            self.say("the result shown is not one to edit", error=True)
+            return
+        if text == copy_text(grid.value(row, col)) or (text == "NULL" and grid.value(row, col) is None):
+            self.say("unchanged")
+            return
+        self.app.create_background_task(self._edit_value(s, source, grid, row, col, text))
+
+    async def _edit_value(self, s: Session, source: Cell, grid: Grid, row: int, col: int, text: str) -> None:
+        kind = s.profile.type
+        try:
+            table = source_table(source.ran_sql or source.ran_text)
+        except EditError as e:
+            self.say(f"cannot edit: {e}", error=True)
+            return
+        known = s.columns.get(table.lower())
+        if known is None and s.db is not None and source.conn_index == 0:
+            try:  # not in the catalog yet: ask the table for its columns
+                async with s.lock:
+                    known = await asyncio.get_running_loop().run_in_executor(None, s.db.columns_of, table)
+            except Exception:
+                known = None
+        columns, rows, _cells, kinds, types, numeric = grid.source
+        try:
+            sql, shown = build_update(kind, table, list(columns), rows[row], kinds, types, numeric, col, text,
+                                      {c.lower() for c in known} if known else None)
+        except EditError as e:
+            self.say(f"cannot edit: {e}", error=True)
+            return
+        cell = Cell(self, s)
+        cell.conn_index, cell.keep_pane = source.conn_index, True
+        cell.buffer.set_document(Document(sql, len(sql)), bypass_readonly=True)
+        self._append_cell(s, cell)
+        await self.run_cell(s, cell, sql)
+        cell.keep_pane = False  # run again by hand later, it is a cell like any other
+        if not cell.affected:
+            if cell.affected == 0:
+                self.say("UPDATE changed no row: the row is not as shown any more", error=True)
+            return
+        if grid.rows > row and grid.source[1][row] is rows[row]:
+            old = grid.set_value(row, col, shown)
+            data_rows = source.data[1] if source.data else None
+            if isinstance(data_rows, list):  # what is saved for the next start
+                for n, r in enumerate(data_rows):
+                    if r is old:
+                        data_rows[n] = grid.source[1][row]
+                        break
+        pending = "" if s.db is None or getattr(s.db, "autocommit", True) else " · not committed (commit; to keep it)"
+        self.say(f"{columns[col]} updated in {cell.affected} row{'s' if cell.affected != 1 else ''}{pending}",
+                 error=cell.affected != 1)
+        self.app.invalidate()
 
     def run(self) -> None:
         try:

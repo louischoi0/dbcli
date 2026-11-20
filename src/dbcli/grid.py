@@ -109,6 +109,32 @@ class Grid:
         self.rows = len(self.source[1])
         self._redraw()
 
+    def set_value(self, row: int, col: int, v) -> tuple | None:
+        """Put v at a row (in the order shown) and column, as an UPDATE of it did; the column
+        widens for it unless its width was dragged. Returns the row it replaced."""
+        if self.source is None or not (0 <= row < self.rows and 0 <= col < len(self.widths)):
+            return None
+        columns, rows, cells, kinds, types, numeric = self.source
+        old = rows[row]
+        new = old[:col] + (v,) + old[col + 1:]
+        text = cell_text(v)
+        new_cells = list(cells[row])
+        new_cells[col] = text
+        rows, cells = list(rows), list(cells)
+        rows[row], cells[row] = new, new_cells
+        if self.original is not None:
+            orig_rows, orig_cells = list(self.original[0]), list(self.original[1])
+            for n, r in enumerate(orig_rows):
+                if r is old:
+                    orig_rows[n], orig_cells[n] = new, new_cells
+                    break
+            self.original = (orig_rows, orig_cells)
+        if col not in self.dragged:
+            self.widths[col] = max(self.widths[col], min(MAX_COL_WIDTH, get_cwidth(text)))
+        self.source = (columns, rows, cells, kinds, types, numeric)
+        self._redraw()
+        return old
+
     def _redraw(self) -> None:
         self.lines, self.col_x = _render(*self.source, self.widths, self.sort)
 
