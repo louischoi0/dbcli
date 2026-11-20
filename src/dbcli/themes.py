@@ -90,6 +90,7 @@ def style_dict(c: dict) -> dict[str, str]:
         # each connection's label on a cell, its own color
         "prompt.conn0": second, "prompt.conn1": c["conn1"], "prompt.conn2": c["conn2"], "prompt.conn3": c["conn3"],
         "cell.focused": f"bg:{c['cell_bg']}",  # an earlier cell being edited / re-run
+        "ran": f"bg:{mix(accent, 0.3)}",  # the text a cell just ran: lit, then it blinks out
         "note": dim,
         "note.cancel": "#ff6b6b bold",  # ✗: a run cancelled with Ctrl-C
         "note.time": f"{faint} italic",  # when a run finished, beside its row count

@@ -12,12 +12,12 @@ editing, notebook-like cells, Oracle autotrace and an AI assistant panel.
   `UPDATE` in a new cell.
 - **Side panel** with tabs: History, Schema browser, Trace (execution plan with E-Rows vs A-Rows,
   statistics), Monitor (sessions), Bookmark (saved queries; one with an `@alias` is a template), AI and
-  Settings (color theme: Sky, Forest, Ember, Dusk).
+  Settings (color theme: Sky, Forest, Ember, Dusk; vi / emacs keys).
 - **Autotrace** (Oracle, on by default): every run shows `DBMS_XPLAN.DISPLAY_CURSOR` (ALLSTATS LAST)
   and the session statistics.
 - **AI tab**: ask Claude about your SQL; `@c0` sends cell #c0's SQL and its last error as context,
   and the suggested SQL goes into the input with one key. Result rows are never sent.
-- **Command palette** (`Ctrl-P`): every command with its shortcut, searchable.
+- **Command palette** (`Ctrl-P`): every command with its shortcut, searchable, Tab completes the word.
 - Up to four connections per terminal (`conn0` … `conn3`); history, last results and the AI chat
   are kept per connection across restarts.
 
@@ -74,9 +74,10 @@ Without a key, everything except the AI tab works as usual.
 |---|---|
 | `Ctrl-O`, `Alt-Enter`, `F5` | Run the input |
 | `F4` / `O` (NORMAL) | Run only the statement / the line under the cursor |
+| `P` (NORMAL) | Duplicate the cell below |
 | `Ctrl-N` | New cell |
 | `Ctrl-R` | Bookmark the cell's SQL (an optional memo and `@alias`; `U` redoes in NORMAL mode) |
-| `$` / `%` (NORMAL) | Top / bottom cell |
+| `gg` / `G` (NORMAL) | Top cell's first line / bottom cell's last line |
 | `Ctrl-U` | Format the cell's SQL |
 | `Alt-8` / `Alt-9` / `Alt-0` | Focus the prompt / side panel / result pane |
 | `Alt-1` … `Alt-7` | Panel tab: History / Schema / Trace / Monitor / Bookmark / AI / Settings |

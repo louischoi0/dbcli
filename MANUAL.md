@@ -124,8 +124,8 @@ The layout follows the terminal's size. Panes, tabs, list items and the two swit
 | Key | Does |
 |---|---|
 | **`Ctrl-O`** | Runs the whole input area (no `;` needed), in INSERT and NORMAL mode. |
-| **`$`** (NORMAL) | Jumps to the top cell. `d$`, `c$` and `$` in VISUAL keep their usual meaning. |
-| **`%`** (NORMAL) | Jumps to the bottom cell (the input cell), at the end of its text, staying in NORMAL mode. `d%`, `c%` and `%` in VISUAL keep their usual meaning (vim's "matching bracket" is replaced). |
+| **`gg`** (NORMAL) | Jumps to the top cell, at the start of its first line. With a count (`3gg`) it goes to that line of this cell, as in vim. |
+| **`G`** (NORMAL) | Jumps to the bottom cell (the input cell), at the first non-blank of its last line, staying in NORMAL mode. With a count (`5G`), that line of this cell. `dG`, `ygg` and `G` in VISUAL keep their usual meaning (within the cell); `$` and `%` are vim's own (line end, matching bracket). |
 | **`Ctrl-N`** | A new empty cell below the cell under the cursor, focused in INSERT mode (with the completion menu open, Ctrl-N still moves in it). |
 | `Alt+Enter`, `F5` | The same. |
 | `Ctrl+Enter` | The same, where the terminal sends Ctrl+Enter distinctly from Enter (below). |
@@ -157,6 +157,7 @@ After a run it returns to INSERT mode, ready for the next query.
 | Both | `↑` / `↓` on the first / last line: the previous / next cell (section 6, "Cells"; `k` / `j` in NORMAL) · `Ctrl-C` cancels a running statement (on its cell; on an empty input, or in the panel or the result pane, everything running: Oracle answers ORA-01013 and the connection stays usable), else clears the input cell, or drops the edits of an earlier cell · `Ctrl-L` clears the shell's cells · `Ctrl-D` on an empty input quits |
 
 - **`Ctrl-U` formats the cell under the cursor** (sqlparse): one select item to a line, `FROM` / `JOIN` / `WHERE` / `AND` / `GROUP BY` on lines of their own, subqueries indented, spaces around operators. Keywords and names keep the case you typed; comments and hints stay. `u` (NORMAL mode) undoes it. PL/SQL blocks and `@template` calls are left alone. (It replaces vi's "delete to the line's start"; in the panel and the result pane Ctrl-U still scrolls.)
+- `P` (Shift+P) in NORMAL mode copies the focused cell right below it, on the same connection, and moves there (the cursor where it was). vim's "put before the cursor" is replaced; `p` still puts after it.
 - `L` (Shift+L) in NORMAL mode clears the focused cell; `u` brings the text back. (vim's "cursor to the bottom of the screen" is replaced. In INSERT mode Shift+L types a capital L.)
 - `u` undoes a whole insert (`i` … `Esc`) at once, as in vim.
 - `cw` changes to the end of the word and keeps the following space, as in vim.
@@ -214,7 +215,7 @@ Editing works on the result of a query on one plain table (no join, subquery, un
 
 ### Command palette (`Ctrl-P`)
 
-`Ctrl-P` (anywhere, any mode) opens a list of every command with its shortcut, like VS Code's. Type to search: each word must appear in the command's name, its group or its key (`run`, `format`, `ctrl-u`, `templ`), and the words show in bold blue. `↑` / `↓` (or `Ctrl-P` / `Ctrl-N`, `Ctrl-K` / `Ctrl-J`, `PageUp` / `PageDown`) choose, `Enter` or a click runs it, `Esc` closes the list.
+`Ctrl-P` (anywhere, any mode) opens a list of every command with its shortcut, like VS Code's. Type to search: each word must appear in the command's name, its group or its key (`run`, `format`, `ctrl-u`, `book`), and the words show in bold blue. **`Tab` completes the word being typed** from the words of the commands still matching: the one word it can be (a space follows), else what they all start with; Tab again goes through them one by one, Shift-Tab back (`boo` Tab → `bookmark `, then `c` Tab → `current`, Tab → `cell`). **`panel`, `focus` and `run` come first**: `p` Tab is `panel` at once (Tab again: the next word starting with p), likewise `f` → `focus`, `r` → `run`. `↑` / `↓` (or `Ctrl-P` / `Ctrl-N`, `Ctrl-K` / `Ctrl-J`, `PageUp` / `PageDown`) choose, `Enter` or a click runs it, `Esc` closes the list.
 
 A command does exactly what its key does, where that key works: a cell command (run, format, new cell, conn0…3) acts on the cell you were in (or the cell edited last), a tab command opens its tab first (Schema's Ctrl-O, Bookmark's `a`), a result command works on the result pane. With the completion menu open, `Ctrl-P` still moves up in it. (vim's NORMAL-mode Ctrl-P, "line up", and emacs mode's "previous line" are replaced; use `k` / `↑`.)
 
@@ -499,6 +500,7 @@ Each record in the shell is an editable **cell** (like a notebook). The bottom c
 - An edited earlier cell gets **`(stale)`** under it and in the result title: what shows no longer matches its text.
 - **Ctrl-O** in that cell re-runs it in place: the result and row count update and `(stale)` goes. Focus stays on the cell.
 - **Ctrl-C** in an earlier cell drops the edits, back to the text that last ran; on a running cell it cancels the statement.
+- **What just ran is lit**: the text a run takes gets a background of its own (the theme's accent, toned down): the whole cell for `Ctrl-O`, the statement for `F4`, the line for `O`, the `UPDATE` of a result-grid edit. It stays while the statement runs and 5 seconds after it ends, then blinks three times and goes. Editing the cell takes the mark off at once.
 - **An emptied cell goes on one more delete**: delete all of a cell's text (`dd` on its one line, `ggdG`, `Shift+L`, backspace) and it stays, empty, its result gone with the text; one more delete key on the empty cell (backspace or Delete in INSERT mode, `dd`, `x`, `X`, `D` or `Shift+L` in NORMAL mode) removes the cell itself. The focus moves to the next cell; when the bottom cell goes, to the start of the cell above, which is the bottom one then (so a held backspace does not eat into it). The last cell left is only emptied, never removed.
 - Text from the History or Schema tab goes to the cell edited last (a History recall goes to the input cell).
 
@@ -533,7 +535,7 @@ Each record in the shell is an editable **cell** (like a notebook). The bottom c
 
 ### 6.5 Settings tab
 
-`Alt-7` opens it: settings kept in one tab, saved to `[ui]` in `config.toml` (the rest of the file is left as it is). For now it holds the **theme**. `j` / `k` move, Enter applies the theme under the cursor at once (● marks the one in use) and saves it as `[ui] theme`, so the next start has it too. Each line shows the theme's colors: accent, second accent, numbers, text, dates, tables.
+`Alt-7` opens it: settings kept in one tab, saved to `[ui]` in `config.toml` (the rest of the file is left as it is). It holds the **theme** and the **editing mode**. `j` / `k` move, Enter applies the line under the cursor at once (● marks what is in use) and saves it as `[ui] theme` / `[ui] editing_mode`, so the next start has it too. Each line shows the theme's colors: accent, second accent, numbers, text, dates, tables.
 
 | Theme | Colors |
 |---|---|
@@ -543,6 +545,8 @@ Each record in the shell is an editable **cell** (like a notebook). The bottom c
 | `dusk` | Lavender and violet, pink accents |
 
 Every theme is for a dark terminal: dbcli draws no background of its own, only its marks (the selection, the focused cell, alternate result rows). The trace tab's plan operations keep their colors in every theme, since each means a kind of operation.
+
+**Editing mode**: `vi` (the default: NORMAL / INSERT / VISUAL, section 4) or `emacs` (Ctrl-A / Ctrl-E, Ctrl-K …, always typing). It changes at once for every input: the cells, the bookmark editor, the question lines. Switching to vi starts in NORMAL mode.
 
 ## 7. Config file
 

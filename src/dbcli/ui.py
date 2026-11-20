@@ -319,6 +319,46 @@ def highlighted(text: str, base: str = "class:input") -> list[tuple[str, str]]:
     return out
 
 
+FLASH_HOLD, FLASH_BLINKS, FLASH_BLINK = 5.0, 3, 0.25  # a run's text: lit 5 s after it ends, then 3 blinks
+
+
+def flash_on(started_done: float | None, now: float) -> bool | None:
+    """Whether the text of a run shows its background now: True while it runs (`started_done`
+    None) and FLASH_HOLD seconds after it ended, then off / on in turn FLASH_BLINKS times;
+    None once it is over (the mark can go)."""
+    if started_done is None:
+        return True
+    t = now - started_done
+    if t < FLASH_HOLD:
+        return True
+    k = int((t - FLASH_HOLD) / FLASH_BLINK)
+    if k >= 2 * FLASH_BLINKS:
+        return None
+    return k % 2 == 1  # off first, then on: a blink
+
+
+class RanHighlight(Processor):
+    """The text a cell ran (all of it, the statement of F4, the line of `O`) on a background of
+    its own, so the last run is easy to see; it blinks out after a while (flash_on). The mark
+    goes when the text is edited."""
+
+    def __init__(self, cell: "Cell"):
+        self.cell = cell
+
+    def apply_transformation(self, ti):
+        f = self.cell.flash
+        if f is None or ti.document.text != f["text"] or not flash_on(f["done"], time.monotonic()):
+            return Transformation(ti.fragments)
+        line_start = ti.document.translate_row_col_to_index(ti.lineno, 0)
+        lo, hi = f["start"] - line_start, f["end"] - line_start
+        if hi <= 0 or lo >= len(ti.document.lines[ti.lineno]):
+            return Transformation(ti.fragments)
+        frags = explode_text_fragments(ti.fragments)
+        for i in range(max(0, lo), min(hi, len(frags))):
+            frags[i] = (f"{frags[i][0]} class:ran", frags[i][1], *frags[i][2:])
+        return Transformation(frags)
+
+
 class SqlHighlight(Processor):
     """The input area's keywords and hint blocks (`/*+ ... */` may span lines), by sql_marks."""
 
@@ -648,8 +688,45 @@ def palette_match(query: str, c: Command) -> int | None:
     return 0 if not words or c.label.lower().startswith(words[0]) else 1
 
 
+PALETTE_WORD_RE = re.compile(r"[\w@$#][\w@$#.-]*")
+PALETTE_FIRST = ("panel", "focus", "run")  # Tab offers these first: `p` Tab is `panel` straight away
+
+
+def palette_completions(query: str, commands: list[Command]) -> tuple[str, list[str]]:
+    """Tab in the palette: (the word being typed, the words it can become). The words come from
+    the labels and groups of the commands the words before it still match, those that start
+    with it (in any case), in the order they first show up; a word typed in full is left out."""
+    head, _, part = query.rpartition(" ") if not query.endswith(" ") else (query.rstrip(), " ", "")
+    if not part:
+        return part, []
+    low, seen, out = part.lower(), set(), []
+    for c in commands:
+        if palette_match(head, c) is None:
+            continue
+        for w in PALETTE_WORD_RE.findall(f"{c.label} {c.group}"):
+            key = w.lower()
+            if key.startswith(low) and key != low and key not in seen:
+                seen.add(key)
+                out.append(w)
+    first = [w for name in PALETTE_FIRST for w in out if w.lower() == name]
+    return part, first + [w for w in out if w not in first]
+
+
+def common_prefix(words: list[str]) -> str:
+    """The longest start all of them share, ignoring case (in the first one's case)."""
+    if not words:
+        return ""
+    n = len(words[0])
+    for w in words[1:]:
+        n = min(n, len(w))
+        while n and w[:n].lower() != words[0][:n].lower():
+            n -= 1
+    return words[0][:n]
+
+
 class CommandPalette:
-    """Ctrl-P: every command with its shortcut; type to search, ↑/↓ to choose, Enter to run."""
+    """Ctrl-P: every command with its shortcut; type to search, ↑/↓ to choose, Enter to run.
+    Tab completes the word being typed from the commands' words (again: the next one)."""
 
     ROWS = 16
 
@@ -657,8 +734,12 @@ class CommandPalette:
         self.commands, self._run = commands, run
         self.open = False
         self.index = 0
-        self.buffer = Buffer(multiline=False, on_text_changed=lambda b: setattr(self, "index", 0))
+        self.buffer = Buffer(multiline=False, on_text_changed=self._changed)
+        self._cycle: dict | None = None  # repeated Tab: {"start", "words", "i"} of the word cycled through
+        self._completing = False  # the text changes because Tab put a word in
         kb = KeyBindings()
+        kb.add("tab")(lambda e: self.complete(1))
+        kb.add("s-tab")(lambda e: self.complete(-1))
         kb.add("up")(kb.add("c-p")(kb.add("c-k")(lambda e: self._move(-1))))
         kb.add("down")(kb.add("c-n")(kb.add("c-j")(lambda e: self._move(1))))
         kb.add("pageup")(lambda e: self._move(-self.ROWS))
@@ -676,6 +757,43 @@ class CommandPalette:
                    height=lambda: Dimension.exact(max(1, min(self.ROWS, len(self.matches()))))),
         ], width=Dimension.exact(72), style="class:palette")
         self.container = ConditionalContainer(body, filter=Condition(lambda: self.open))
+
+    def _changed(self, _buf) -> None:
+        self.index = 0
+        if not self._completing:
+            self._cycle = None  # typed on: the next Tab completes afresh
+
+    def complete(self, step: int) -> None:
+        """Tab: the word being typed becomes the one word it can be (and a space follows), else
+        what all of them start with; a Tab after that goes through them one by one (Shift-Tab
+        back)."""
+        text = self.buffer.text
+        c = self._cycle
+        if c is not None:
+            c["i"] = (c["i"] + step) % len(c["words"])
+            self._set(c["start"] + c["words"][c["i"]])
+            return
+        part, words = palette_completions(text, self.commands)
+        if not words:
+            return
+        start = text[:len(text) - len(part)]
+        if len(words) == 1:
+            self._set(start + words[0] + " ")
+            return
+        prefix = common_prefix(words)
+        first = words[0].lower() in PALETTE_FIRST  # panel / focus / run: that word at once, the rest on Tab
+        if len(prefix) > len(part) and not first:
+            self._set(start + prefix)
+            return
+        self._cycle = {"start": start, "words": words, "i": 0 if step > 0 else len(words) - 1}
+        self._set(start + words[self._cycle["i"]])
+
+    def _set(self, text: str) -> None:
+        self._completing = True
+        try:
+            self.buffer.set_document(Document(text, len(text)))
+        finally:
+            self._completing = False
 
     def matches(self) -> list[Command]:
         q = self.buffer.text
@@ -961,6 +1079,7 @@ class Cell:
         self.ran_sql: str | None = None  # the statement its result came from (F4 / O run a part of the text)
         self.affected: int | None = None  # rows a DML changed on its last run, None after an error
         self.keep_pane = False  # an UPDATE from the result grid: its outcome does not replace the result shown
+        self.flash: dict | None = None  # the text the last run took: {"start", "end", "text", "done"} (RanHighlight)
         self.output: list[tuple[str, str]] = [note] if note else []
         self.grid: Grid | None = None
         self.trace: list[str] | None = None  # autotrace lines of the last run, if it was traced
@@ -985,6 +1104,7 @@ class Cell:
                 BufferControl(buffer=self.buffer, input_processors=[SqlHighlight(),
                                                                 MissingObjects(lambda: self.session.objects,
                                                                                lambda t: app.columns_for(self.session, t)),
+                                                                RanHighlight(self),
                                                                 GhostText(app.words)]),
                 dont_extend_height=True, wrap_lines=True, get_line_prefix=self._prefix,
                 style=self._style)
@@ -1279,8 +1399,8 @@ class App:
             C("Cell", "New cell below", "Ctrl-N", ("c-n",), "cell"),
             C("Cell", "Format SQL", "Ctrl-U", ("c-u",), "cell"),
             C("Cell", "Clear cell text", "L (NORMAL)", ("L",), "cell-normal"),
-            C("Cell", "Go to top cell", "$ (NORMAL)", ("$",), "cell-normal"),
-            C("Cell", "Go to bottom cell", "% (NORMAL)", ("%",), "cell-normal"),
+            C("Cell", "Go to top cell", "gg (NORMAL)", ("g", "g"), "cell-normal"),
+            C("Cell", "Go to bottom cell", "G (NORMAL)", ("G",), "cell-normal"),
             C("Cell", "Clear shell (keep input cell)", "Ctrl-L", ("c-l",)),
             *conns,
             C("Focus", "Prompt (input cell)", "Alt-8", (PROMPT_KEY,)),
@@ -1294,6 +1414,7 @@ class App:
             C("Monitor", "Take snapshot", "Ctrl-O (Monitor tab)", ("c-o",), "tab:monitor"),
             C("Bookmark", "Add bookmark", "a (Bookmark tab)", ("a",), "tab:bookmark"),
             C("Bookmark", "Bookmark the current cell's SQL", "Ctrl-R", ("c-r",), "cell"),
+            C("Cell", "Duplicate the cell below", "P (NORMAL)", ("P",), "cell-normal"),
             C("Bookmark", "Set a bookmark's @alias (template)", "t (Bookmark tab)", ("t",), "tab:bookmark"),
             C("AI", "Ask AI a question", "a (AI tab)", ("a",), "tab:ai"),
             C("AI", "Insert SQL from the last answer", "i (AI tab)", ("i",), "tab:ai"),
@@ -1312,6 +1433,7 @@ class App:
         self._palette_mode = self.app.vi_state.input_mode
         self.palette.buffer.reset()
         self.palette.index = 0
+        self.palette._cycle = None
         self.palette.open = True
         self.app.layout.focus(self.palette.search)
         if self.vi:
@@ -1602,6 +1724,21 @@ class App:
         self._focus_cell(new, at_end=True)
         if self.vi:
             self.app.vi_state.input_mode = InputMode.INSERT
+
+    def duplicate_cell(self, cell: Cell) -> None:
+        """NORMAL Shift+P: a copy of the cell's text right below it, on the same connection,
+        focused with the cursor where it was (vim's "put before the cursor" gives way)."""
+        if not cell.buffer.text.strip():
+            self.say("P: the cell is empty, nothing to copy", error=True)
+            return
+        text, at = cell.buffer.text, cell.buffer.cursor_position
+        self.new_cell_below(cell)
+        copy = self._focused_cell()
+        copy.conn_index = cell.conn_index
+        copy.buffer.set_document(Document(text, at), bypass_readonly=True)
+        if self.vi:
+            self.app.vi_state.input_mode = InputMode.NAVIGATION
+        self.say(f"cell copied below (conn{cell.conn_index})")
 
     def drop_if_empty(self, cell: Cell) -> None:
         """A cell whose text was all deleted stays, empty, its result gone with the text; one more
@@ -1973,26 +2110,37 @@ class App:
             self.say(f"not an editor command: :{cmd} (w, wq, x, q, q!)", error=True)
 
     # -- settings: several settings in one tab; for now the color theme ------------------
+    EDITING_MODES = {"vi": "vim keys: NORMAL / INSERT / VISUAL (the default)",
+                     "emacs": "emacs keys: Ctrl-A / Ctrl-E, Ctrl-K …, always typing"}
+
     def _settings_rows(self) -> list[tuple[str, str]]:
-        """What each line of the tab is: ("head" | "section" | "theme", value)."""
-        return [("head", ""), ("section", "Theme")] + [("theme", name) for name in THEMES]
+        """What each line of the tab is: ("head" | "section" | "theme" | "mode" | "gap", value)."""
+        return ([("head", ""), ("section", "Theme")] + [("theme", name) for name in THEMES]
+                + [("gap", ""), ("section", "Editing mode")] + [("mode", m) for m in self.EDITING_MODES])
 
     def _settings_items(self):
         out = []
-        width = max(len(t.title) for t in THEMES.values()) + 2
+        width = max([len(t.title) for t in THEMES.values()] + [len(m) for m in self.EDITING_MODES]) + 2
+        mark = lambda on: ("class:list.active" if on else "class:list.note", " ● " if on else " ○ ")
         for kind, value in self._settings_rows():
             if kind == "head":
                 out.append(([("class:schema.title", "Settings"),
                              ("class:list.note", "  Enter applies · saved to config.toml [ui]")], "", ""))
             elif kind == "section":
                 out.append(([("class:schema.kind", value)], "", ""))
-            else:
+            elif kind == "gap":
+                out.append(("", "", ""))
+            elif kind == "theme":
                 t, on = THEMES[value], value == self.theme
-                frags = [("class:list.active" if on else "class:list.note", " ● " if on else " ○ "),
-                         ("class:schema.title" if on else "", f"{t.title:<{width}}")]
+                frags = [mark(on), ("class:schema.title" if on else "", f"{t.title:<{width}}")]
                 frags += [(f"class:swatch.{t.name}.{k}", "  ") for k in SWATCH]
                 frags.append(("class:list.note", f"  {t.about}"))
                 out.append((frags, "", "default" if t.name == DEFAULT_THEME else ""))
+            else:
+                on = (value == "vi") == self.vi
+                frags = [mark(on), ("class:schema.title" if on else "", f"{value:<{width}}"),
+                         ("class:list.note", self.EDITING_MODES[value])]
+                out.append((frags, "", "default" if value == "vi" else ""))
         return out
 
     def _settings_pick(self, i: int) -> None:
@@ -2002,6 +2150,18 @@ class App:
         kind, value = rows[i]
         if kind == "theme":
             self.set_theme(value)
+        elif kind == "mode":
+            self.set_editing_mode(value)
+
+    def _save_ui(self, key: str, value: str, shown: str) -> None:
+        """Keep a setting for the next start ([ui] in config.toml), and say it is on."""
+        try:
+            save_ui_setting(self.ai_settings.config_path or CONFIG_PATH, key, value)
+        except (OSError, ConnectionError_) as e:
+            self.say(f"{shown} on, but not saved: {e}", error=True)
+            return
+        self._ai_mtime = self._config_mtime()  # our own write: nothing for the AI tab to reload
+        self.say(shown)
 
     def set_theme(self, name: str) -> None:
         """Draw with the theme now, and keep it for the next start ([ui] theme in config.toml)."""
@@ -2009,13 +2169,19 @@ class App:
             return
         self.theme, self.style = name, theme_style(name)
         self.app.invalidate()
-        try:
-            save_ui_setting(self.ai_settings.config_path or CONFIG_PATH, "theme", name)
-        except (OSError, ConnectionError_) as e:
-            self.say(f"theme {THEMES[name].title} on, but not saved: {e}", error=True)
+        self._save_ui("theme", name, f"theme: {THEMES[name].title}")
+
+    def set_editing_mode(self, mode: str) -> None:
+        """vi or emacs keys from now on in every input (cells, the editors, the question lines),
+        and on the next start ([ui] editing_mode)."""
+        if mode not in self.EDITING_MODES:
             return
-        self._ai_mtime = self._config_mtime()  # our own write: nothing for the AI tab to reload
-        self.say(f"theme: {THEMES[name].title}")
+        self.vi = mode == "vi"
+        self.app.editing_mode = EditingMode.VI if self.vi else EditingMode.EMACS
+        if self.vi:  # the focus is in this tab: back in a cell, NORMAL mode, as at the start of vim
+            self.app.vi_state.input_mode = InputMode.NAVIGATION
+        self.app.invalidate()
+        self._save_ui("editing_mode", mode, f"editing mode: {mode}")
 
     # -- AI: questions about SQL to Claude, with this session's context ---------------------
     # no key yet: the subscriptions to pick from, or how to add one
@@ -2265,10 +2431,18 @@ class App:
             s.watch = Watch()  # a damaged file: no snapshot
 
     async def spin_loop(self) -> None:
-        """Redraw while a cell runs, so its spinner turns."""
+        """Redraw while a cell runs, so its spinner turns, and while a run's text is lit (its
+        blinks); a mark whose blinks are over goes."""
         while True:
             await asyncio.sleep(SPIN_INTERVAL)
-            if any(c.running for c in self._session.cells):
+            now, redraw = time.monotonic(), False
+            for c in self._session.cells:
+                if c.flash is not None:
+                    if flash_on(c.flash["done"], now) is None:
+                        c.flash = None
+                    redraw = True  # one more frame: the mark's last change (or its going) shows
+                redraw = redraw or c.running
+            if redraw:
                 self.app.invalidate()
 
     # -- schema browser: kinds -> objects -> an object's details (and DDL) --------------
@@ -3151,15 +3325,26 @@ class App:
             kb.add("c-w", str(i), filter=in_shell)(lambda e, i=i: self.set_conn(i))
         kb.add("c-@", filter=in_shell)(lambda e: self.set_conn(2))
 
-        @kb.add("$", filter=in_shell & vi_navigation_mode)
-        def _(event):  # NORMAL `$` (Shift+4): the top cell; `d$` and visual `$` keep their meaning
+        # NORMAL `gg` / `G` go past the cell: the top cell's first line, the bottom cell's last.
+        # With a count (`5G`, `3gg`) they go to that line of this cell, as in vim; `dG`, `ygg`
+        # and VISUAL `G` keep their meaning (an operator pending is not NORMAL mode here).
+        @kb.add("g", "g", filter=in_shell & vi_navigation_mode)
+        def _(event):
+            if event.arg_present:
+                self._goto_line(event.current_buffer, event.arg - 1)
+                return
             cells = self._editable(self._session)
             if cells:
                 self._focus_cell(cells[0], at_end=False)
 
-        @kb.add("%", filter=in_shell & vi_navigation_mode)
-        def _(event):  # NORMAL `%` (Shift+5): the bottom cell; `d%` and visual `%` keep their meaning
-            self._focus_cell(self._session.input_cell, at_end=True)
+        @kb.add("G", filter=in_shell & vi_navigation_mode)
+        def _(event):
+            if event.arg_present:
+                self._goto_line(event.current_buffer, event.arg - 1)
+                return
+            cell = self._session.input_cell
+            self.app.layout.focus(cell.window)
+            self._goto_line(cell.buffer, cell.buffer.document.line_count - 1)  # its first non-blank, as vim's G
 
         @kb.add("c-n", filter=in_shell)
         def _(event):  # a new cell below the one under the cursor
@@ -3172,6 +3357,10 @@ class App:
         @kb.add("O", filter=in_shell & vi_navigation_mode)
         def _(event):  # NORMAL Shift+O: run only the line under the cursor (vim's "open line above" gives way)
             self.run_line(self._focused_cell())
+
+        @kb.add("P", filter=in_shell & vi_navigation_mode)
+        def _(event):  # NORMAL Shift+P: a copy of the cell right below it
+            self.duplicate_cell(self._focused_cell())
 
         @kb.add("c-r", filter=in_shell)
         def _(event):  # bookmark the cell's SQL (asks for a name and an optional @alias)
@@ -3186,6 +3375,14 @@ class App:
             self.snapshot_and_quit()
 
         return kb
+
+    @staticmethod
+    def _goto_line(buf: Buffer, row: int) -> None:
+        """Line `row` of the cell (the last one past its end), at its first non-blank."""
+        doc = buf.document
+        row = max(0, min(doc.line_count - 1, row))
+        line = doc.lines[row]
+        buf.cursor_position = doc.translate_row_col_to_index(row, 0) + len(line) - len(line.lstrip())
 
     @staticmethod
     def _vim_fixes(kb: KeyBindings, in_shell) -> None:
@@ -3237,7 +3434,18 @@ class App:
         if not text.strip() or cell.running:
             return
         # it runs in place: Ctrl-N adds a cell for the next statement
+        self.mark_run(cell, 0, len(text))
         self.app.create_background_task(self.run_cell(s, cell, text))
+
+    @staticmethod
+    def mark_run(cell: Cell, start: int, end: int) -> None:
+        """Light up the part of the cell's text that runs (RanHighlight), until it has blinked out."""
+        text = cell.buffer.text
+        while start < end and text[start].isspace():
+            start += 1
+        while end > start and text[end - 1].isspace():
+            end -= 1
+        cell.flash = {"start": start, "end": end, "text": text, "done": None}
 
     def _move_handler(self, direction: str):
         def handler(event):
@@ -3417,6 +3625,7 @@ class App:
             return
         if not prepare_statement(stmt.text, s.profile.type):
             return
+        self.mark_run(source, stmt.start, stmt.end)
         self.app.create_background_task(self._run_statement(s, source, stmt.text, buf.text))
 
     def run_line(self, source: Cell) -> None:
@@ -3432,6 +3641,9 @@ class App:
             return
         if not prepare_statement(line, s.profile.type):
             return
+        doc = buf.document
+        at = doc.translate_row_col_to_index(doc.cursor_position_row, 0)
+        self.mark_run(source, at, at + len(doc.current_line))
         self.app.create_background_task(self._run_statement(s, source, line, buf.text))
 
     async def _run_statement(self, s: Session, cell: Cell, stmt: str, whole: str) -> None:
@@ -3571,6 +3783,8 @@ class App:
                 s.catalog_stale = True  # read again only when asked: Ctrl-O in the schema tab
         finally:
             cell.running = cell.cancelled = False
+            if cell.flash is not None and cell.flash["done"] is None:
+                cell.flash["done"] = time.monotonic()  # the hold, then the blinks, start now
             self.app.invalidate()
 
     def _finish(self, s: Session, cell: Cell, text: str, output, grid: Grid | None = None,
@@ -3624,6 +3838,7 @@ class App:
         cell.conn_index, cell.keep_pane = source.conn_index, True
         cell.buffer.set_document(Document(sql, len(sql)), bypass_readonly=True)
         self._append_cell(s, cell)
+        self.mark_run(cell, 0, len(sql))
         await self.run_cell(s, cell, sql)
         cell.keep_pane = False  # run again by hand later, it is a cell like any other
         if not cell.affected:
