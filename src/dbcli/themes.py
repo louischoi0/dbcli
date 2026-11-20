@@ -90,7 +90,6 @@ def style_dict(c: dict) -> dict[str, str]:
         # each connection's label on a cell, its own color
         "prompt.conn0": second, "prompt.conn1": c["conn1"], "prompt.conn2": c["conn2"], "prompt.conn3": c["conn3"],
         "cell.focused": f"bg:{c['cell_bg']}",  # an earlier cell being edited / re-run
-        "ran": f"bg:{mix(accent, 0.3)}",  # the text a cell just ran: lit, then it blinks out
         "note": dim,
         "note.cancel": "#ff6b6b bold",  # ✗: a run cancelled with Ctrl-C
         "note.time": f"{faint} italic",  # when a run finished, beside its row count
@@ -210,6 +209,16 @@ def mix(color: str, keep: float, base: str = "#1c1c1c") -> str:
     a = [int(color[i:i + 2], 16) for i in (1, 3, 5)]
     b = [int(base[i:i + 2], 16) for i in (1, 3, 5)]
     return "#" + "".join(f"{round(x * keep + y * (1 - keep)):02x}" for x, y in zip(a, b))
+
+
+BACKGROUND = "#1c1c1c"  # what a dark terminal's background is taken to be (a fade ends there)
+
+
+def flash_colors(name: str) -> tuple[str, str, str]:
+    """The text a cell just ran: its background when lit, and the two it fades into (the
+    terminal's, and the focused earlier cell's own)."""
+    c = THEMES.get(name, THEMES[DEFAULT_THEME]).colors
+    return mix(c["accent"], 0.3), BACKGROUND, c["cell_bg"]
 
 
 def style(name: str) -> Style:

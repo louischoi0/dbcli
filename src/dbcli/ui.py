@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import math
 import datetime as dt
 import os
 import re
@@ -69,7 +70,7 @@ from .db import (MAX_ROWS, PAGE_ROWS, changes_schema, error_text, format_table, 
 from . import monitor, schema
 from .formatter import NotFormatted, format_sql
 from .statements import statement_at
-from .themes import DEFAULT_THEME, SWATCH, THEMES, style as theme_style
+from .themes import DEFAULT_THEME, SWATCH, THEMES, flash_colors, style as theme_style
 from .grid import BORDER, HEADER_LINES, Grid, build, copy_text, fit
 from .cell_edit import EditError, build_update, source_table
 from .objects import blank_noise, column_refs, in_table_slot, scan, table_refs
@@ -319,43 +320,58 @@ def highlighted(text: str, base: str = "class:input") -> list[tuple[str, str]]:
     return out
 
 
-FLASH_HOLD, FLASH_BLINKS, FLASH_BLINK = 5.0, 3, 0.25  # a run's text: lit 5 s after it ends, then 3 blinks
+# a run's text: lit, pulsing slowly (one soft dip a second) while it runs and FLASH_TIME seconds
+# after, the last FLASH_FADE of them fading it out
+FLASH_TIME, FLASH_FADE, FLASH_PERIOD, FLASH_DIP = 3.0, 1.0, 1.0, 0.45
+FADE_INTERVAL = 0.04  # redraws while a mark is lit (25 a second), so it pulses and fades smoothly
 
 
-def flash_on(started_done: float | None, now: float) -> bool | None:
-    """Whether the text of a run shows its background now: True while it runs (`started_done`
-    None) and FLASH_HOLD seconds after it ended, then off / on in turn FLASH_BLINKS times;
-    None once it is over (the mark can go)."""
-    if started_done is None:
-        return True
-    t = now - started_done
-    if t < FLASH_HOLD:
-        return True
-    k = int((t - FLASH_HOLD) / FLASH_BLINK)
-    if k >= 2 * FLASH_BLINKS:
+def flash_level(started: float, done: float | None, now: float) -> float | None:
+    """How lit the text of a run is now, 1 (its full background) to 0; None once it is over
+    (the mark can go). It pulses from the start: down by FLASH_DIP and back up every
+    FLASH_PERIOD, smoothly (a cosine); after the run (`done`) the last FLASH_FADE of
+    FLASH_TIME eases it out to nothing."""
+    pulse = 1 - FLASH_DIP * 0.5 * (1 - math.cos(2 * math.pi * (now - started) / FLASH_PERIOD))
+    if done is None:
+        return pulse
+    t = now - done
+    if t >= FLASH_TIME:
         return None
-    return k % 2 == 1  # off first, then on: a blink
+    fade_at = FLASH_TIME - FLASH_FADE
+    envelope = 1.0 if t < fade_at else 0.5 * (1 + math.cos(math.pi * (t - fade_at) / FLASH_FADE))
+    return pulse * envelope
+
+
+def blend(color: str, base: str, keep: float) -> str:
+    """`keep` of color, the rest base (#rrggbb both)."""
+    a = [int(color[i:i + 2], 16) for i in (1, 3, 5)]
+    b = [int(base[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(f"{round(x * keep + y * (1 - keep)):02x}" for x, y in zip(a, b))
 
 
 class RanHighlight(Processor):
     """The text a cell ran (all of it, the statement of F4, the line of `O`) on a background of
-    its own, so the last run is easy to see; it blinks out after a while (flash_on). The mark
-    goes when the text is edited."""
+    its own, so the last run is easy to see; after a while it fades into the background around
+    it (flash_level). The mark goes when the text is edited."""
 
     def __init__(self, cell: "Cell"):
         self.cell = cell
 
     def apply_transformation(self, ti):
         f = self.cell.flash
-        if f is None or ti.document.text != f["text"] or not flash_on(f["done"], time.monotonic()):
+        level = flash_level(f["started"], f["done"], time.monotonic()) if f is not None else None
+        if level is None or ti.document.text != f["text"]:
             return Transformation(ti.fragments)
+        lit, terminal, cell_bg = self.cell.app.flash_colors
+        base = cell_bg if self.cell.focused() and not self.cell.is_input else terminal
+        style = f"bg:{blend(lit, base, level)}"
         line_start = ti.document.translate_row_col_to_index(ti.lineno, 0)
         lo, hi = f["start"] - line_start, f["end"] - line_start
         if hi <= 0 or lo >= len(ti.document.lines[ti.lineno]):
             return Transformation(ti.fragments)
         frags = explode_text_fragments(ti.fragments)
         for i in range(max(0, lo), min(hi, len(frags))):
-            frags[i] = (f"{frags[i][0]} class:ran", frags[i][1], *frags[i][2:])
+            frags[i] = (f"{frags[i][0]} {style}", frags[i][1], *frags[i][2:])
         return Transformation(frags)
 
 
@@ -1270,6 +1286,7 @@ class App:
         self.templates = templates
         self.theme = ui.theme if ui.theme in THEMES else DEFAULT_THEME
         self.style = theme_style(self.theme)  # the app draws with whatever this is (Settings tab: a theme)
+        self.flash_colors = flash_colors(self.theme)  # a run's lit text, and what it fades into
         self.words = WordModel(DATA_DIR / "words.db")
         self.completer = WordCompleter(self.words, self.templates)
         self.words.context = self._completion_context
@@ -2167,7 +2184,7 @@ class App:
         """Draw with the theme now, and keep it for the next start ([ui] theme in config.toml)."""
         if name not in THEMES:
             return
-        self.theme, self.style = name, theme_style(name)
+        self.theme, self.style, self.flash_colors = name, theme_style(name), flash_colors(name)
         self.app.invalidate()
         self._save_ui("theme", name, f"theme: {THEMES[name].title}")
 
@@ -2431,16 +2448,19 @@ class App:
             s.watch = Watch()  # a damaged file: no snapshot
 
     async def spin_loop(self) -> None:
-        """Redraw while a cell runs, so its spinner turns, and while a run's text is lit (its
-        blinks); a mark whose blinks are over goes."""
+        """Redraw while a cell runs, so its spinner turns, and while a run's text is lit (often
+        enough that its pulse and fade look smooth); a mark that has faded out goes."""
+        lit = False
         while True:
-            await asyncio.sleep(SPIN_INTERVAL)
-            now, redraw = time.monotonic(), False
+            await asyncio.sleep(FADE_INTERVAL if lit else SPIN_INTERVAL)
+            now, redraw, lit = time.monotonic(), False, False
             for c in self._session.cells:
                 if c.flash is not None:
-                    if flash_on(c.flash["done"], now) is None:
+                    if flash_level(c.flash["started"], c.flash["done"], now) is None:
                         c.flash = None
-                    redraw = True  # one more frame: the mark's last change (or its going) shows
+                    else:
+                        lit = True
+                    redraw = True  # each frame of the pulse, and the one where it goes
                 redraw = redraw or c.running
             if redraw:
                 self.app.invalidate()
@@ -3445,7 +3465,7 @@ class App:
             start += 1
         while end > start and text[end - 1].isspace():
             end -= 1
-        cell.flash = {"start": start, "end": end, "text": text, "done": None}
+        cell.flash = {"start": start, "end": end, "text": text, "started": time.monotonic(), "done": None}
 
     def _move_handler(self, direction: str):
         def handler(event):
