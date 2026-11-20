@@ -320,25 +320,26 @@ def highlighted(text: str, base: str = "class:input") -> list[tuple[str, str]]:
     return out
 
 
-# a run's text: lit, pulsing slowly (one soft dip a second) while it runs and FLASH_TIME seconds
-# after, the last FLASH_FADE of them fading it out
-FLASH_TIME, FLASH_FADE, FLASH_PERIOD, FLASH_DIP = 3.0, 1.0, 1.0, 0.45
+# a run's text: lit, pulsing slowly (one soft dip a second) as long as it runs and at least
+# FLASH_MIN seconds from its start, then fading out over FLASH_FADE
+FLASH_MIN, FLASH_FADE, FLASH_PERIOD, FLASH_DIP = 1.0, 0.6, 1.0, 0.45
 FADE_INTERVAL = 0.04  # redraws while a mark is lit (25 a second), so it pulses and fades smoothly
 
 
 def flash_level(started: float, done: float | None, now: float) -> float | None:
     """How lit the text of a run is now, 1 (its full background) to 0; None once it is over
     (the mark can go). It pulses from the start: down by FLASH_DIP and back up every
-    FLASH_PERIOD, smoothly (a cosine); after the run (`done`) the last FLASH_FADE of
-    FLASH_TIME eases it out to nothing."""
+    FLASH_PERIOD, smoothly (a cosine), for as long as the run goes on (`done` None). It ends
+    FLASH_MIN after the start, or FLASH_FADE after the run when that is later, easing out to
+    nothing over the last FLASH_FADE."""
     pulse = 1 - FLASH_DIP * 0.5 * (1 - math.cos(2 * math.pi * (now - started) / FLASH_PERIOD))
     if done is None:
         return pulse
-    t = now - done
-    if t >= FLASH_TIME:
+    end = max(started + FLASH_MIN, done + FLASH_FADE)
+    if now >= end:
         return None
-    fade_at = FLASH_TIME - FLASH_FADE
-    envelope = 1.0 if t < fade_at else 0.5 * (1 + math.cos(math.pi * (t - fade_at) / FLASH_FADE))
+    fade_at = end - FLASH_FADE
+    envelope = 1.0 if now < fade_at else 0.5 * (1 + math.cos(math.pi * (now - fade_at) / FLASH_FADE))
     return pulse * envelope
 
 
@@ -1096,6 +1097,7 @@ class Cell:
         self.affected: int | None = None  # rows a DML changed on its last run, None after an error
         self.keep_pane = False  # an UPDATE from the result grid: its outcome does not replace the result shown
         self.flash: dict | None = None  # the text the last run took: {"start", "end", "text", "done"} (RanHighlight)
+        self.cursor_hidden = False  # just ran: no cursor over the lit text until a key is pressed
         self.output: list[tuple[str, str]] = [note] if note else []
         self.grid: Grid | None = None
         self.trace: list[str] | None = None  # autotrace lines of the last run, if it was traced
@@ -1123,6 +1125,7 @@ class Cell:
                                                                 RanHighlight(self),
                                                                 GhostText(app.words)]),
                 dont_extend_height=True, wrap_lines=True, get_line_prefix=self._prefix,
+                always_hide_cursor=Condition(lambda: self.cursor_hidden),
                 style=self._style)
             app.cell_of[self.window] = self
             parts.append(self.window)
@@ -2447,6 +2450,11 @@ class App:
         except (KeyError, TypeError, ValueError):
             s.watch = Watch()  # a damaged file: no snapshot
 
+    def _show_cursor(self, _sender=None) -> None:
+        """Any key brings back the cursor a run hid (Ctrl-O's own key comes before the run)."""
+        for c in self._session.cells:
+            c.cursor_hidden = False
+
     async def spin_loop(self) -> None:
         """Redraw while a cell runs, so its spinner turns, and while a run's text is lit (often
         enough that its pulse and fade look smooth); a mark that has faded out goes."""
@@ -2457,7 +2465,7 @@ class App:
             for c in self._session.cells:
                 if c.flash is not None:
                     if flash_level(c.flash["started"], c.flash["done"], now) is None:
-                        c.flash = None
+                        c.flash, c.cursor_hidden = None, False
                     else:
                         lit = True
                     redraw = True  # each frame of the pulse, and the one where it goes
@@ -3466,6 +3474,7 @@ class App:
         while end > start and text[end - 1].isspace():
             end -= 1
         cell.flash = {"start": start, "end": end, "text": text, "started": time.monotonic(), "done": None}
+        cell.cursor_hidden = True  # back with the next key, or when the mark goes
 
     def _move_handler(self, direction: str):
         def handler(event):
@@ -3889,6 +3898,7 @@ class App:
                 self.panel.tabs[PANEL_TABS.index("schema")].cursor = 0 if b.level == "detail" else b.cursors.get(b.level, 0)
                 self.app.create_background_task(self.refresh_suggestions())
                 self.app.create_background_task(self.spin_loop())
+                self.app.key_processor.before_key_press += self._show_cursor
             self.app.run(pre_run=start)
         finally:
             sys.stdout.write(MODIFY_OTHER_KEYS_OFF)
