@@ -58,6 +58,7 @@ class UISettings:
     show_panel: bool = True
     editing_mode: str = "vi"  # vi | emacs  (input area key bindings)
     theme: str = "sky"  # the color theme (themes.THEMES): sky | forest | ember | dusk
+    close_page: str = "delete"  # closing a shell page: delete (at once) | confirm (ask when it holds cells)
 
 
 AI_EFFORTS = ("low", "medium", "high", "xhigh", "max")
@@ -133,9 +134,12 @@ def load(path: Path = CONFIG_PATH) -> Config:
     ui = UISettings(panel=panel,
                     show_panel=bool(ui_data.get("show_panel", True)),
                     editing_mode=ui_data.get("editing_mode", "vi"),
-                    theme=str(ui_data.get("theme", "sky")))
+                    theme=str(ui_data.get("theme", "sky")),
+                    close_page=str(ui_data.get("close_page", "delete")))
     if ui.editing_mode not in ("vi", "emacs"):
         raise ConfigError('[ui] editing_mode must be "vi" or "emacs"')
+    if ui.close_page not in ("delete", "confirm"):
+        raise ConfigError('[ui] close_page must be "delete" or "confirm"')
     from .themes import THEMES
     if ui.theme not in THEMES:
         raise ConfigError(f"[ui] theme must be one of {', '.join(THEMES)}")

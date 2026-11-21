@@ -104,6 +104,11 @@ def style_dict(c: dict) -> dict[str, str]:
         "tab": dim,
         "tab.active": f"{light} bold",
         "tab.active.focused": f"bg:{accent} #1c1c1c bold",  # the panel has focus: its tab is filled
+        # the shell's page tabs, above the cells
+        "page.bar": "",
+        "page": dim,
+        "page.active": f"bg:{accent} #1c1c1c bold",
+        "page.new": f"{accent} bold",
         # lists in the panel
         "list.active": accent,
         "list.cursor": f"bg:{c['select_bg']} {light}",

@@ -138,6 +138,13 @@ ANSI_SEQUENCES["\x1b[24;5~"] = Keys.PageDown
 SHIFT_SPACE = Keys.ControlF6
 for _seq in ("\x1b[27;2;32~", "\x1b[32;2u"):
     ANSI_SEQUENCES[_seq] = SHIFT_SPACE
+# Alt+← / Alt+→: the shell's previous / next page. Keys of their own (not Esc then an arrow, which
+# would hold up a lone Esc in vim): the xterm modifier form and the meta-prefixed one.
+PAGE_PREV, PAGE_NEXT = Keys.ControlF7, Keys.ControlF8
+for _seq in ("\x1b[1;3D", "\x1b[1;9D", "\x1b\x1b[D"):
+    ANSI_SEQUENCES[_seq] = PAGE_PREV
+for _seq in ("\x1b[1;3C", "\x1b[1;9C", "\x1b\x1b[C"):
+    ANSI_SEQUENCES[_seq] = PAGE_NEXT
 MODIFY_OTHER_KEYS_ON, MODIFY_OTHER_KEYS_OFF = "\x1b[>4;1m", "\x1b[>4;0m"
 
 AI_PROMPT = "prompt>"  # the AI tab's question line
@@ -724,6 +731,7 @@ class Command:
     shortcut: str  # as shown
     keys: tuple  # the key presses to replay
     where: str = "any"  # any | cell | cell-normal | results | tab:<name>
+    action: Callable[[], None] | None = None  # called instead, for a command with no key of its own
 
 
 def palette_match(query: str, c: Command) -> int | None:
@@ -1123,6 +1131,7 @@ class Cell:
 
     def __init__(self, app: "App", session: "Session", note: tuple[str, str] | None = None):
         self.app, self.session = app, session
+        self.page: Page = session.page  # the shell page it sits on (made on the page shown)
         self.ran_text: str | None = None  # input as it was last executed
         self.ran_sql: str | None = None  # the statement its result came from (F4 / O run a part of the text)
         self.affected: int | None = None  # rows a DML changed on its last run, None after an error
@@ -1168,7 +1177,7 @@ class Cell:
 
     @property
     def is_input(self) -> bool:
-        return self is self.session.input_cell
+        return self is self.page.input_cell
 
     @property
     def has_run(self) -> bool:
@@ -1189,7 +1198,7 @@ class Cell:
         """`#c0 conn0> ` on the first line (the cell's number from the top, a spinner for `>`
         while it runs), `_ ` under it on the last."""
         style = "class:prompt.stale" if self.stale else "class:prompt" if self.focused() else "class:prompt.dim"
-        cells = self.app._editable(self.session)
+        cells = [c for c in self.page.cells if c.buffer is not None]
         tag = f"#c{cells.index(self) if self in cells else 0} "
         label = f"conn{self.conn_index}"
         pad = " " * (len(tag) + len(label))
@@ -1271,6 +1280,25 @@ def ddl_lines(ddl: str) -> list:
 
 
 @dataclass
+class Page:
+    """One page of the shell: a stack of cells of its own, a tab above the shell. The session's
+    `cells`, `input_cell`, `stack` … are those of the page shown."""
+    name: str
+    cells: list[Cell] = field(default_factory=list)  # oldest first, input cell last
+    input_cell: Cell | None = None
+    edit_cell: Cell | None = None  # last focused editable cell (panel inserts go here)
+    last_run: Cell | None = None  # most recently executed cell
+    shown: Cell | None = None  # cell whose result is in the bottom pane
+    stack: HSplit | None = None
+    container: ScrollablePane | None = None
+
+
+def _on_page(name: str, doc: str) -> property:
+    """A Session attribute that is the current page's."""
+    return property(lambda s: getattr(s.page, name), lambda s, v: setattr(s.page, name, v), doc=doc)
+
+
+@dataclass
 class Session:
     """The connection's state: one per terminal, its files under .dbclidata/sessions/<name>/."""
     profile: Profile
@@ -1291,13 +1319,8 @@ class Session:
     autotrace: bool = True  # on from the start; F8 / click: plan and statistics in the trace tab (Oracle)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # one DB call at a time
     connecting: asyncio.Task | None = None
-    cells: list[Cell] = field(default_factory=list)  # oldest first, input cell last
-    input_cell: Cell | None = None
-    edit_cell: Cell | None = None  # last focused editable cell (panel inserts go here)
-    last_run: Cell | None = None  # most recently executed cell
-    shown: Cell | None = None  # cell whose result is in the bottom pane
-    stack: HSplit | None = None
-    container: ScrollablePane | None = None
+    pages: list[Page] = field(default_factory=list)  # the shell's pages, as their tabs show them
+    page_index: int = 0  # the page shown
     folder: Path | None = None  # .dbclidata/sessions/<name>
     runs: list[tuple[dt.datetime | None, str]] = field(default_factory=list)  # every run; run N is runs[N-1]
     history: list[tuple[int, dt.datetime | None, str]] = field(default_factory=list)  # the History tab's rows
@@ -1305,6 +1328,18 @@ class Session:
     extra: list = field(default_factory=lambda: [None] * (CONNECTIONS - 1))  # conn1..conn3, opened on first use
     extra_locks: list = field(default_factory=lambda: [asyncio.Lock() for _ in range(CONNECTIONS - 1)])
     restore: dict | None = None  # where F1's snapshot left the focus, applied once the app runs
+
+    @property
+    def page(self) -> Page:
+        return self.pages[self.page_index]
+
+    cells = _on_page("cells", "the page's cells, oldest first, input cell last")
+    input_cell = _on_page("input_cell", "the page's bottom cell")
+    edit_cell = _on_page("edit_cell", "the page's last focused editable cell")
+    last_run = _on_page("last_run", "the page's most recently executed cell")
+    shown = _on_page("shown", "the page's cell whose result is in the bottom pane")
+    stack = _on_page("stack", "the page's cells, as laid out")
+    container = _on_page("container", "the page's scrolling shell")
 
 
 class App:
@@ -1328,6 +1363,7 @@ class App:
         self.show_panel = ui.show_panel
         self.trace_raw = False  # `r` in the trace tab: DISPLAY_CURSOR as DBMS_XPLAN's table
         self.vi = ui.editing_mode == "vi"
+        self.close_page_mode = ui.close_page  # delete | confirm
         self.message, self.error = "", False
         self._tab_cycle: dict | None = None  # the word Tab is cycling through, see _cycle_tab
         self.cell_of: dict[Window, Cell] = {}
@@ -1400,7 +1436,8 @@ class App:
         editor = HSplit([Window(FormattedTextControl(self._editor_header), height=1, char="─", style="class:border"),
                          self.editor_window], width=lambda: Dimension.exact(self.panel.width()))
         top = VSplit([
-            HSplit([shell, ConditionalContainer(
+            HSplit([Window(FormattedTextControl(self._page_tabs), height=1, style="class:page.bar"),
+                    shell, ConditionalContainer(
                 HSplit([Window(height=1, char="─", style="class:border"), self.shell_ask_window]),
                 filter=asking_shell)]),
             ConditionalContainer(
@@ -1464,6 +1501,11 @@ class App:
             C("Cell", "Go to top cell", "gg (NORMAL)", ("g", "g"), "cell-normal"),
             C("Cell", "Go to bottom cell", "G (NORMAL)", ("G",), "cell-normal"),
             C("Cell", "Clear shell (keep input cell)", "Ctrl-L", ("c-l",)),
+            C("Page", "New page", "Ctrl-T", ("c-t",)),
+            C("Page", "Next page", "Alt-→ / gt", (PAGE_NEXT,)),
+            C("Page", "Previous page", "Alt-← / gT", (PAGE_PREV,)),
+            C("Page", "Close page", "", (), action=self.close_page),
+            C("Page", "Rename page", "", (), action=self.rename_page),
             *conns,
             C("Focus", "Prompt (input cell)", "Alt-8", (PROMPT_KEY,)),
             C("Focus", "Side panel", "Alt-9", (PANEL_KEY,)),
@@ -1513,6 +1555,9 @@ class App:
     def _run_command(self, c: Command) -> None:
         """Do what the command's shortcut does: put the focus where that key works, then feed
         the key in (once the palette's own key is done)."""
+        if c.action is not None:
+            asyncio.get_running_loop().call_soon(c.action)
+            return
         keys = list(c.keys)
         if c.where in ("cell", "cell-normal"):
             cell = self.cell_of.get(self._palette_back) or self._target_cell()
@@ -1533,14 +1578,22 @@ class App:
         asyncio.get_running_loop().call_soon(feed)
 
     # -- cells ----------------------------------------------------------
+    def _new_page(self, s: Session, name: str, at: int | None = None) -> Page:
+        """A page with one empty cell, put at `at` (else last) and shown."""
+        page = Page(name)
+        page.stack = HSplit([])
+        page.container = ScrollablePane(page.stack, display_arrows=False)
+        at = len(s.pages) if at is None else at
+        s.pages.insert(at, page)
+        s.page_index = at  # shown, so the cell is made on it
+        page.input_cell = page.edit_cell = Cell(self, s)
+        page.cells.append(page.input_cell)
+        page.stack.children.append(page.input_cell.container)
+        return page
+
     def _new_session(self, p: Profile) -> Session:
         s = Session(p)
-        s.stack = HSplit([])
-        s.container = ScrollablePane(s.stack, display_arrows=False)
-        s.input_cell = Cell(self, s)
-        s.cells.append(s.input_cell)
-        s.stack.children.append(s.input_cell.container)
-        s.edit_cell = s.input_cell
+        self._new_page(s, "main")
         s.folder = session_dir(p.name)
         s.file_history = FileHistory(str(s.folder / "history"))
         s.runs = load_history(s.folder / "history")
@@ -1581,29 +1634,31 @@ class App:
                 grid.sort_by(sort[0])
         return grid
 
-    def _snapshot(self, s: Session) -> dict:
+    def _page_snapshot(self, page: Page) -> dict:
         cells = []
-        for c in s.cells:  # the input cell last, with its own run (Ctrl-O runs it in place)
+        for c in page.cells:  # the input cell last, with its own run (Ctrl-O runs it in place)
             if c.buffer is None:
                 cells.append({"note": list(c.output[0]) if c.output else ["class:note", ""]})
                 continue
             entry = {"text": c.buffer.text, "cursor": c.buffer.cursor_position, "ran_text": c.ran_text,
                      "output": [list(f) for f in c.output], "title": c.result_title, "trace": c.trace,
-                     "more": c.pager is not None, "input": c is s.input_cell, "conn": c.conn_index}
+                     "more": c.pager is not None, "input": c is page.input_cell, "conn": c.conn_index}
             if c.grid is not None and c.grid.source is not None:
                 entry.update(self._grid_state(c.grid))
             cells.append(entry)
+        index = lambda c: page.cells.index(c) if c in page.cells else None
+        return {"name": page.name, "cells": cells, "edit": index(page.edit_cell), "shown": index(page.shown),
+                "last_run": index(page.last_run)}
+
+    def _snapshot(self, s: Session) -> dict:
         focused = self._focused_cell()
         current = self.app.layout.current_window
-        order = s.cells
-        index = lambda c: order.index(c) if c in order else None
         return {
-            "version": 2, "cells": cells,
-            "input": {"text": s.input_cell.buffer.text, "cursor": s.input_cell.buffer.cursor_position},
+            "version": 3, "pages": [self._page_snapshot(p) for p in s.pages], "page": s.page_index,
+            # where the focus is: in the page shown
             "focus": ("results" if current is self.results.window else "panel" if current is self.panel.window
-                      else "input" if focused is None else index(focused)),
+                      else "input" if focused is None else s.cells.index(focused)),
             "insert": self.app.vi_state.input_mode == InputMode.INSERT,
-            "edit": index(s.edit_cell), "shown": index(s.shown), "last_run": index(s.last_run),
             "result": {"row": self.results.row, "col": self.results.col,
                        "scroll": self.results.window.vertical_scroll},
             "panel": {"show": self.show_panel, "tab": self.panel.index,
@@ -1612,6 +1667,30 @@ class App:
         }
 
     def _restore_snapshot(self, s: Session, snap: dict) -> None:
+        # version 3: pages; before, the cells of one page (version 1: the input cell's text apart)
+        pages = snap.get("pages") or [{"name": "main", **{k: snap.get(k) for k in ("cells", "input", "edit",
+                                                                                    "shown", "last_run")}}]
+        made_of: list[list[Cell]] = []
+        for i, entry in enumerate(pages):
+            if i:
+                self._new_page(s, str(entry.get("name") or f"page{i + 1}"))
+            else:
+                s.page.name = str(entry.get("name") or "main")
+            made_of.append(self._restore_page(s, entry))
+        s.page_index = snap["page"] if isinstance(snap.get("page"), int) and 0 <= snap["page"] < len(s.pages) else 0
+        made = made_of[s.page_index]
+        pick = lambda i: made[i] if isinstance(i, int) and 0 <= i < len(made) else None
+        cursors = {c: c.buffer.cursor_position for cells in made_of for c in cells if c.buffer is not None}
+        cursors.update({p.input_cell: p.input_cell.buffer.cursor_position for p in s.pages})
+        s.autotrace = bool(snap.get("autotrace", True))
+        focus = snap.get("focus")
+        s.restore = {"focus": pick(focus) if isinstance(focus, int) else focus,
+                     "insert": snap.get("insert", True), "result": snap.get("result") or {},
+                     "panel": snap.get("panel") or {}, "saved_at": snap.get("saved_at", ""),
+                     "cursors": cursors}
+
+    def _restore_page(self, s: Session, snap: dict) -> list[Cell]:
+        """The page shown gets the snapshot's cells for it; the cells made, in order."""
         made: list[Cell] = []
         for entry in snap.get("cells") or []:
             if "note" in entry:
@@ -1641,16 +1720,10 @@ class App:
             inp = snap.get("input") or {}
             text = inp.get("text") or ""
             s.input_cell.buffer.set_document(Document(text, min(inp.get("cursor", len(text)), len(text))))
-        cursors = {c: c.buffer.cursor_position for c in made + [s.input_cell] if c.buffer is not None}
         s.edit_cell = pick(snap.get("edit")) or s.input_cell
         s.shown = pick(snap.get("shown"))
         s.last_run = pick(snap.get("last_run"))
-        s.autotrace = bool(snap.get("autotrace", True))
-        focus = snap.get("focus")
-        s.restore = {"focus": pick(focus) if isinstance(focus, int) else focus,
-                     "insert": snap.get("insert", True), "result": snap.get("result") or {},
-                     "panel": snap.get("panel") or {}, "saved_at": snap.get("saved_at", ""),
-                     "cursors": cursors}
+        return made
 
     def _apply_restore(self, s: Session) -> None:
         """After start: focus, cursor and panes as the snapshot left them."""
@@ -1726,34 +1799,36 @@ class App:
             self.say(f"could not save the last run: {e}", error=True)
 
     def _insert_cell(self, s: Session, cell: Cell) -> None:
-        """Add a cell just above the input cell, dropping the oldest beyond MAX_CELLS."""
-        s.cells.insert(len(s.cells) - 1, cell)
-        s.stack.children.insert(len(s.stack.children) - 1, cell.container)
-        while len(s.cells) > MAX_CELLS:
-            old = s.cells.pop(0)
-            s.stack.children.pop(0)
+        """Add a cell just above the input cell of its page, dropping the oldest beyond MAX_CELLS."""
+        p = cell.page
+        p.cells.insert(len(p.cells) - 1, cell)
+        p.stack.children.insert(len(p.stack.children) - 1, cell.container)
+        while len(p.cells) > MAX_CELLS:
+            old = p.cells.pop(0)
+            p.stack.children.pop(0)
             self.cell_of.pop(old.window, None)
-            if s.edit_cell is old:
-                s.edit_cell = s.input_cell
+            if p.edit_cell is old:
+                p.edit_cell = p.input_cell
         if hasattr(self, "app"):  # not yet while the last run is restored at start
             self.app.invalidate()
 
     def _append_cell(self, s: Session, cell: Cell) -> None:
-        """Add a cell at the bottom of the shell, after every run: it becomes the bottom (input)
+        """Add a cell at the bottom of its page, after every run: it becomes the bottom (input)
         cell, unless that one is still empty and unrun, which then stays the bottom one."""
-        bottom = s.input_cell
+        p = cell.page
+        bottom = p.input_cell
         if bottom is not None and not bottom.buffer.text.strip() and not bottom.has_run:
             self._insert_cell(s, cell)
             return
-        s.cells.append(cell)
-        s.stack.children.append(cell.container)
-        s.input_cell = cell
-        while len(s.cells) > MAX_CELLS:
-            old = s.cells.pop(0)
-            s.stack.children.pop(0)
+        p.cells.append(cell)
+        p.stack.children.append(cell.container)
+        p.input_cell = cell
+        while len(p.cells) > MAX_CELLS:
+            old = p.cells.pop(0)
+            p.stack.children.pop(0)
             self.cell_of.pop(old.window, None)
-            if s.edit_cell is old:
-                s.edit_cell = s.input_cell
+            if p.edit_cell is old:
+                p.edit_cell = p.input_cell
         self.app.invalidate()
 
     def set_conn(self, i: int) -> None:
@@ -1801,6 +1876,89 @@ class App:
         if self.vi:
             self.app.vi_state.input_mode = InputMode.NAVIGATION
         self.say(f"cell copied below (conn{cell.conn_index})")
+
+    # -- pages: the shell's tabs, each a stack of cells of its own -------------
+    def _page_tabs(self):
+        """The tab line above the shell: each page (a click shows it), then `+` for a new one."""
+        s = self._session
+        out = []
+        for i, p in enumerate(s.pages):
+            busy = " …" if any(c.running for c in p.cells) else ""
+            out.append(("class:page.active" if i == s.page_index else "class:page", f" {i + 1} {p.name}{busy} ",
+                        clicked(lambda i=i: self.show_page(i))))
+            out.append(("class:border", "│"))
+        out.append(("class:page.new", " + ", clicked(self.new_page)))
+        out.append(("class:list.note", "  Ctrl-T new · Alt+←/→ switch"))
+        return out
+
+    def show_page(self, i: int) -> None:
+        """Show page i: its cells in the shell, its last result below, the focus where it was."""
+        s = self._session
+        if not 0 <= i < len(s.pages):
+            return
+        s.page_index = i
+        cell = s.edit_cell if s.edit_cell in s.cells and s.edit_cell.buffer is not None else s.input_cell
+        self.app.layout.focus(cell.window)
+        self.say(f"page {i + 1}/{len(s.pages)}: {s.page.name}")
+        self.app.invalidate()
+
+    def step_page(self, delta: int) -> None:
+        s = self._session
+        if len(s.pages) > 1:
+            self.show_page((s.page_index + delta) % len(s.pages))
+
+    def new_page(self) -> None:
+        """Ctrl-T: an empty page right after the one shown, shown, its cell in INSERT mode."""
+        s = self._session
+        taken = {p.name for p in s.pages}
+        name = next(f"page{n}" for n in range(len(s.pages) + 1, 10 ** 6) if f"page{n}" not in taken)
+        self._new_page(s, name, at=s.page_index + 1)
+        self.show_page(s.page_index)
+        if self.vi:
+            self.app.vi_state.input_mode = InputMode.INSERT
+
+    def close_page(self) -> None:
+        """Close the page shown, its cells with it ([ui] close_page = "confirm": asked first,
+        when it holds any). The statements it ran stay in the History tab."""
+        s = self._session
+        page = s.page
+        if len(s.pages) == 1:
+            self.say("the last page stays (empty its cells instead)", error=True)
+            return
+        if any(c.running for c in page.cells):
+            self.say(f"page {page.name}: a statement is still running", error=True)
+            return
+        filled = [c for c in page.cells if c.buffer is not None and (c.buffer.text.strip() or c.has_run)]
+        if self.close_page_mode == "confirm" and filled:
+            n = len(filled)
+            self._ask_for(f"close {page.name} ({n} cell{'s' if n != 1 else ''})? y/n", "",
+                          lambda a: None if a.lower() in ("y", "n", "yes", "no") else "y or n",
+                          lambda a: self._drop_page(s, page) if a.lower().startswith("y") else self.say("kept"),
+                          shell=True)
+            return
+        self._drop_page(s, page)
+
+    def _drop_page(self, s: Session, page: Page) -> None:
+        if page not in s.pages or len(s.pages) == 1:
+            return
+        for c in page.cells:
+            self._drop_pager(c)
+            self.cell_of.pop(c.window, None)
+        s.pagers = [c for c in s.pagers if c.page is not page]
+        i = s.pages.index(page)
+        s.pages.pop(i)
+        s.page_index = min(i, len(s.pages) - 1)
+        self.show_page(s.page_index)
+        self.say(f"page {page.name} closed")
+
+    def rename_page(self) -> None:
+        s = self._session
+        page = s.page
+
+        def done(name: str) -> None:
+            page.name = name
+            self.say(f"page renamed: {name}")
+        self._ask_for("page name:", page.name, lambda a: None if a else "a page needs a name", done, shell=True)
 
     def drop_if_empty(self, cell: Cell) -> None:
         """A cell whose text was all deleted stays, empty, its result gone with the text; one more
@@ -2181,15 +2339,19 @@ class App:
     # -- settings: several settings in one tab; for now the color theme ------------------
     EDITING_MODES = {"vi": "vim keys: NORMAL / INSERT / VISUAL (the default)",
                      "emacs": "emacs keys: Ctrl-A / Ctrl-E, Ctrl-K …, always typing"}
+    CLOSE_PAGE = {"delete": "a page closes at once, its cells with it (the default)",
+                  "confirm": "asks first when the page holds cells"}
 
     def _settings_rows(self) -> list[tuple[str, str]]:
-        """What each line of the tab is: ("head" | "section" | "theme" | "mode" | "gap", value)."""
+        """Each line's kind: "head" | "section" | "theme" | "mode" | "close" | "gap", and its value."""
         return ([("head", ""), ("section", "Theme")] + [("theme", name) for name in THEMES]
-                + [("gap", ""), ("section", "Editing mode")] + [("mode", m) for m in self.EDITING_MODES])
+                + [("gap", ""), ("section", "Editing mode")] + [("mode", m) for m in self.EDITING_MODES]
+                + [("gap", ""), ("section", "Closing a page")] + [("close", m) for m in self.CLOSE_PAGE])
 
     def _settings_items(self):
         out = []
-        width = max([len(t.title) for t in THEMES.values()] + [len(m) for m in self.EDITING_MODES]) + 2
+        width = max([len(t.title) for t in THEMES.values()] + [len(m) for m in self.EDITING_MODES]
+                    + [len(m) for m in self.CLOSE_PAGE]) + 2
         mark = lambda on: ("class:list.active" if on else "class:list.note", " ● " if on else " ○ ")
         for kind, value in self._settings_rows():
             if kind == "head":
@@ -2205,6 +2367,11 @@ class App:
                 frags += [(f"class:swatch.{t.name}.{k}", "  ") for k in SWATCH]
                 frags.append(("class:list.note", f"  {t.about}"))
                 out.append((frags, "", "default" if t.name == DEFAULT_THEME else ""))
+            elif kind == "close":
+                on = value == self.close_page_mode
+                frags = [mark(on), ("class:schema.title" if on else "", f"{value:<{width}}"),
+                         ("class:list.note", self.CLOSE_PAGE[value])]
+                out.append((frags, "", "default" if value == "delete" else ""))
             else:
                 on = (value == "vi") == self.vi
                 frags = [mark(on), ("class:schema.title" if on else "", f"{value:<{width}}"),
@@ -2221,6 +2388,10 @@ class App:
             self.set_theme(value)
         elif kind == "mode":
             self.set_editing_mode(value)
+        elif kind == "close":
+            self.close_page_mode = value
+            self.app.invalidate()
+            self._save_ui("close_page", value, f"closing a page: {value}")
 
     def _save_ui(self, key: str, value: str, shown: str) -> None:
         """Keep a setting for the next start ([ui] in config.toml), and say it is on."""
@@ -3196,6 +3367,18 @@ class App:
         def _(event):
             self.results.page(1)
 
+        @kb.add("c-t")
+        def _(event):  # a new page of the shell
+            self.new_page()
+
+        @kb.add(PAGE_PREV)
+        def _(event):
+            self.step_page(-1)
+
+        @kb.add(PAGE_NEXT)
+        def _(event):
+            self.step_page(1)
+
         @kb.add(SHIFT_SPACE)
         def _(event):  # no binding of its own: handled exactly as a plain Space
             event.app.key_processor.feed(KeyPress(" ", " "), first=True)
@@ -3424,6 +3607,17 @@ class App:
         # NORMAL `gg` / `G` go past the cell: the top cell's first line, the bottom cell's last.
         # With a count (`5G`, `3gg`) they go to that line of this cell, as in vim; `dG`, `ygg`
         # and VISUAL `G` keep their meaning (an operator pending is not NORMAL mode here).
+        @kb.add("g", "t", filter=in_shell & vi_navigation_mode)
+        def _(event):  # vim's tab keys: the next page (`3gt`: page 3), `gT` the previous
+            if event.arg_present:
+                self.show_page(event.arg - 1)
+            else:
+                self.step_page(1)
+
+        @kb.add("g", "T", filter=in_shell & vi_navigation_mode)
+        def _(event):
+            self.step_page(-1)
+
         @kb.add("g", "g", filter=in_shell & vi_navigation_mode)
         def _(event):
             if event.arg_present:
@@ -3923,10 +4117,12 @@ class App:
         cell.version += 1
         if cell.keep_pane:  # the result it changed stays the one shown (and the last run)
             return
-        s.last_run = cell
+        page = cell.page  # its own page, which may no longer be the one shown
+        page.last_run = cell
         self._save_last(s, cell)
-        if self._focused_cell() is None or self._focused_cell().is_input or self._focused_cell() is cell:
-            s.shown = cell  # show it now unless the user moved on to another history cell
+        focused = self._focused_cell()
+        if page is not s.page or focused is None or focused.is_input or focused is cell:
+            page.shown = cell  # show it now unless the user moved on to another history cell
 
     # -- a value edited in the result grid: an UPDATE in a cell of its own ----------
     def edit_value(self, row: int, col: int, text: str) -> None:
@@ -3962,6 +4158,7 @@ class App:
             self.say(f"cannot edit: {e}", error=True)
             return
         cell = Cell(self, s)
+        cell.page = source.page  # beside the result edited, whichever page shows now
         cell.conn_index, cell.keep_pane = source.conn_index, True
         cell.buffer.set_document(Document(sql, len(sql)), bypass_readonly=True)
         self._append_cell(s, cell)

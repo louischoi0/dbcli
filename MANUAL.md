@@ -90,6 +90,7 @@ The top bar, the shell on the left, the panel on the right, and the result pane 
 |---|---|
 | Top bar | From the left: vim mode, connection state (●), connection name, online state, the latest message, the **autocommit** and **autotrace** switches with their keys, and the target. A narrow terminal cuts from the right, so the important parts come first. The right end lists the main keys. |
 | Shell | The `> ` input area works **like a text editor**: Enter is a new line and **Ctrl-O** runs. A cell of several lines ends with `_ ` on its last line, so `>` … `_` mark where each block starts and ends. The shell keeps each statement run and a short outcome (`(2 rows)`, `OK, 3 row(s) affected`, errors). |
+| Pages | The tab line above the shell: **pages**, each a stack of cells of its own (`1 main │ 2 page2 │ +`). **Ctrl-T** adds a page after the one shown, **Alt+← / Alt+→** (any mode) or **gT / gt** (vim NORMAL; `3gt` page 3) go to the previous / next, a click on a tab shows it, `+` adds one. The Ctrl-P palette also has **Close page** and **Rename page**. Each page keeps its cells, its focus and its last result (the result pane shows the page's own); a statement still running when you move on finishes on its page, whose tab shows `…` meanwhile. Closing a page drops its cells (the statements it ran stay in History); the last page stays. F1's snapshot keeps every page. |
 | Panel | One panel with the **History / Schema / Trace / Monitor / Bookmark / AI / Settings** tabs (`Alt-1` to `Alt-7`). The panel is 96 columns wide (at most half the screen) on most tabs; Trace and Monitor take half the screen, for their wide plans and tables. The first tab shown is `[ui] panel` (section 7). |
 | Result | The latest result as a **boxed table**. Each header cell has the column name on the left and its type on the right (`N` number, `VCH` varchar2, `CH` char, `CL` clob, `BB` blob, `R` raw, `D` date, `T` timestamp, `TZ` timestamp with time zone, `RID` rowid …; Oracle only), the type in a toned-down shade of its values' color. Values are colored by the column's type (numbers green, text yellow, dates lavender, binary teal, booleans orange), numbers right-aligned, NULL dimmed, every other row shaded. Cells are cut at 40 columns with `…`, line breaks show as `↵`. |
 
@@ -544,7 +545,7 @@ Each record in the shell is an editable **cell** (like a notebook). The bottom c
 
 ### 6.5 Settings tab
 
-`Alt-7` opens it: settings kept in one tab, saved to `[ui]` in `config.toml` (the rest of the file is left as it is). It holds the **theme** and the **editing mode**. `j` / `k` move, Enter applies the line under the cursor at once (● marks what is in use) and saves it as `[ui] theme` / `[ui] editing_mode`, so the next start has it too. Each line shows the theme's colors: accent, second accent, numbers, text, dates, tables.
+`Alt-7` opens it: settings kept in one tab, saved to `[ui]` in `config.toml` (the rest of the file is left as it is). It holds the **theme**, the **editing mode** and **closing a page** (`delete`, the default: a page closes at once with its cells; `confirm`: asks `close page2 (3 cells)? y/n` first when it holds any). `j` / `k` move, Enter applies the line under the cursor at once (● marks what is in use) and saves it as `[ui] theme` / `[ui] editing_mode` / `[ui] close_page`, so the next start has it too. Each line shows the theme's colors: accent, second accent, numbers, text, dates, tables.
 
 | Theme | Colors |
 |---|---|
@@ -568,6 +569,7 @@ panel = "history"               # first panel tab: history | schema | trace | mo
 show_panel = true               # false: start with the panel hidden (Ctrl-B shows it)
 editing_mode = "vi"             # input area keys: vi (default) | emacs
 theme = "sky"                   # colors: sky (default) | forest | ember | dusk (the Settings tab sets it)
+close_page = "delete"           # closing a shell page: delete (default, at once) | confirm (ask first)
 
 [ai]                            # the AI tab (6.4); all optional
 model = "claude-opus-5-5"
