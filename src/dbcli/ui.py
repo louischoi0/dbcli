@@ -69,16 +69,16 @@ from .db import (MAX_ROWS, PAGE_ROWS, changes_schema, error_text, format_table, 
                  open_db, prepare_statement)
 from . import monitor, schema
 from .formatter import NotFormatted, format_sql
-from .statements import statement_at
+from .statements import bind_names, statement_at
 from .themes import DEFAULT_THEME, SWATCH, THEMES, flash_colors, style as theme_style
 from .grid import BORDER, HEADER_LINES, Grid, build, copy_text, fit
 from .cell_edit import EditError, build_update, source_table
-from .objects import blank_noise, column_refs, in_table_slot, scan, table_refs
+from .objects import NOISE_RE, blank_noise, column_refs, in_table_slot, scan, table_refs
 from .oracle_hints import HINT_WEIGHT, HINTS
 from .panes import neighbor
 from .tab import tab_action
 from .templates import NAME_PREFIX_RE, TemplateError, Templates
-from .trace_view import render as render_trace
+from .trace_view import raw_width as trace_raw_width, render as render_trace
 from .words import KEYWORDS, PARTIAL_RE, WORD_CHAR_RE, WORD_RE, WordModel, match_case, previous_word
 
 PANEL_WIDTH = 32
@@ -127,6 +127,17 @@ CONN_KEYS = [Keys.ControlF13, Keys.ControlF14, Keys.ControlF15, Keys.ControlF16]
 for _i, _key in enumerate(CONN_KEYS):
     ANSI_SEQUENCES[f"\x1b[27;5;{48 + _i}~"] = _key
     ANSI_SEQUENCES[f"\x1b[{48 + _i};5u"] = _key
+# Ctrl+F11 / Ctrl+F12 stand in for PageUp / PageDown (keyboards that lack those keys; plain F11
+# alone is usually the terminal's fullscreen key). Read the xterm Ctrl-modified function-key
+# sequences straight as PageUp/PageDown, so they behave the same everywhere the two do.
+ANSI_SEQUENCES["\x1b[23;5~"] = Keys.PageUp
+ANSI_SEQUENCES["\x1b[24;5~"] = Keys.PageDown
+# Shift+Space, once modified keys are asked for, arrives as ESC [27;2;32~ (or CSI u ESC [32;2u).
+# Unknown to prompt_toolkit, it would split into Esc [ 2 7 ... ~ and vim's `~` would flip the
+# case under the cursor (`u` undoes). Read it as one key that is just a plain Space.
+SHIFT_SPACE = Keys.ControlF6
+for _seq in ("\x1b[27;2;32~", "\x1b[32;2u"):
+    ANSI_SEQUENCES[_seq] = SHIFT_SPACE
 MODIFY_OTHER_KEYS_ON, MODIFY_OTHER_KEYS_OFF = "\x1b[>4;1m", "\x1b[>4;0m"
 
 AI_PROMPT = "prompt>"  # the AI tab's question line
@@ -158,6 +169,11 @@ def hint_slot(before: str) -> str | None:
 def hint_opening(before: str, after: str) -> bool:
     """True when the `/` just typed can open a hint comment (and nothing follows it)."""
     return bool(HINT_OPEN_RE.search(blank_noise(before))) and not after.startswith("*")
+
+
+def bind_shown(value: str | None) -> str:
+    """A bind value as the note above a run shows it: NULL, else an SQL string."""
+    return "NULL" if value is None else "'" + value.replace("'", "''") + "'"
 
 
 def run_stamp(finished: dt.datetime, seconds: float, cancelled: bool = False) -> str:
@@ -276,6 +292,21 @@ def sql_marks(text: str, lo: int = 0, hi: int | None = None) -> dict[int, str]:
     for i, style in hints.items():
         if not (style == "class:hint.arg" and marks.get(i) == "class:symbol"):
             marks[i] = style
+    marks.update(comment_marks(text, lo, hi))  # last: a comment is gray whatever it holds
+    return marks
+
+
+def comment_marks(text: str, lo: int = 0, hi: int | None = None) -> dict[int, str]:
+    """`--` comments, to the end of their line: gray. NOISE_RE walks strings and comments in
+    order, so a `--` inside a string ('a--b') is not one."""
+    hi = len(text) if hi is None else hi
+    marks: dict[int, str] = {}
+    for m in NOISE_RE.finditer(text):
+        if m.start() >= hi:
+            break
+        if m.group(0).startswith("--") and m.end() > lo:
+            for i in range(max(m.start(), lo), min(m.end(), hi)):
+                marks[i] = "class:comment"
     return marks
 
 
@@ -1249,6 +1280,7 @@ class Session:
     objects_sorted: list[str] = field(default_factory=list)  # the same, sorted: offered after FROM
     columns: dict[str, frozenset | None] = field(default_factory=dict)  # table -> its columns, as loaded
     pagers: list = field(default_factory=list)  # cells whose large result keeps its cursor open
+    binds: dict[str, str] = field(default_factory=dict)  # bind name (lower case) -> the value last typed
     browser: "Browser" = field(default_factory=lambda: Browser())  # the schema tab's place
     watch: "Watch" = field(default_factory=lambda: Watch())  # the monitor tab's last snapshot
     chat: Chat = field(default_factory=Chat)  # the AI tab's conversation
@@ -1294,6 +1326,7 @@ class App:
         self.completer = WordCompleter(self.words, self.templates)
         self.words.context = self._completion_context
         self.show_panel = ui.show_panel
+        self.trace_raw = False  # `r` in the trace tab: DISPLAY_CURSOR as DBMS_XPLAN's table
         self.vi = ui.editing_mode == "vi"
         self.message, self.error = "", False
         self._tab_cycle: dict | None = None  # the word Tab is cycling through, see _cycle_tab
@@ -1313,7 +1346,7 @@ class App:
                                keys={"backspace": self._schema_back, "i": self._schema_insert,
                                      "d": self._schema_ddl, "y": self._schema_copy, "c-o": self._schema_collect}),
             "trace": PanelTab("trace", "Trace", self._trace_items, lambda i: None,
-                              width=self._trace_width),
+                              keys={"r": self._trace_toggle_raw}, width=self._trace_width),
             "monitor": PanelTab("monitor", "Monitor", self._monitor_items, lambda i: None,
                                 keys={"c-o": self._monitor_now}),
             "bookmark": PanelTab("bookmark", "Bookmark", self._template_items, self._template_pick,
@@ -1331,6 +1364,7 @@ class App:
         self.panel = TabbedPanel([tabs[n] for n in PANEL_TABS], ui.panel, width=self._panel_width)
         self._tpl_delete: int | None = None  # the template `d` asked about (a second `d` deletes)
         self._ask: dict | None = None  # the one-line question under the panel (a bookmark's name, its @alias)
+        self._bind_lock = asyncio.Lock()  # one run at a time asks for its bind values (F4 runs several)
         self.ask_buffer = Buffer(multiline=False)
         ask_kb = KeyBindings()
         ask_kb.add("enter")(lambda e: self._ask_done(self.ask_buffer.text.strip()))
@@ -1343,6 +1377,13 @@ class App:
             height=1, style="class:input",
             get_line_prefix=lambda n, w: [("class:ai.prompt" if self._ask and self._ask["label"] == AI_PROMPT
                                            else "class:list.note", f" {self._ask['label']} " if self._ask else " ")])
+        # the same question under the shell, for what a run asks (its bind values): the same
+        # buffer and keys, only shown there
+        self.shell_ask_window = Window(
+            BufferControl(buffer=self.ask_buffer, key_bindings=ask_kb), height=1, style="class:input",
+            get_line_prefix=lambda n, w: [("class:prompt", f" {self._ask['label']} " if self._ask else " ")])
+        asking = Condition(lambda: self._ask is not None and not self._ask["shell"])
+        asking_shell = Condition(lambda: self._ask is not None and self._ask["shell"])
         # the bookmark editor: the Bookmark tab's place while a query is edited (vi keys, `:w` …)
         self._tpl_edit: dict | None = None  # {"id": id or None for a new one, "alias", "saved": body}
         self.editor_buffer = Buffer(multiline=True, completer=self.completer, complete_while_typing=False)
@@ -1359,13 +1400,14 @@ class App:
         editor = HSplit([Window(FormattedTextControl(self._editor_header), height=1, char="─", style="class:border"),
                          self.editor_window], width=lambda: Dimension.exact(self.panel.width()))
         top = VSplit([
-            shell,
+            HSplit([shell, ConditionalContainer(
+                HSplit([Window(height=1, char="─", style="class:border"), self.shell_ask_window]),
+                filter=asking_shell)]),
             ConditionalContainer(
                 VSplit([Window(width=1, char="│", style="class:border"),
                         HSplit([ConditionalContainer(self.panel.container, filter=~editing),
                                 ConditionalContainer(editor, filter=editing),
-                                ConditionalContainer(self.ask_window,
-                                                     filter=Condition(lambda: self._ask is not None))])]),
+                                ConditionalContainer(self.ask_window, filter=asking)])]),
                 filter=Condition(lambda: self.show_panel)),
         ], height=Dimension(weight=3))
 
@@ -2026,12 +2068,17 @@ class App:
             self.copy_to_clipboard(t.body, t.label)
 
     def _ask_for(self, label: str, text: str, check: Callable[[str], str | None],
-                 done: Callable[[str], None]) -> None:
-        """A one-line question under the panel: Enter answers (when `check` finds nothing wrong),
-        Esc / Ctrl-C drops it."""
-        self._ask = {"label": label, "check": check, "done": done, "back": self.app.layout.current_window}
+                 done: Callable[[str], None], cancel: Callable[[], None] | None = None,
+                 shell: bool = False) -> None:
+        """A one-line question under the panel (`shell`: under the shell): Enter answers (when
+        `check` finds nothing wrong), Esc / Ctrl-C drops it (and calls `cancel`, as does another
+        question taking its place)."""
+        if self._ask is not None and self._ask.get("cancel"):
+            self._ask["cancel"]()
+        self._ask = {"label": label, "check": check, "done": done, "cancel": cancel, "shell": shell,
+                     "back": self.app.layout.current_window}
         self.ask_buffer.set_document(Document(text, len(text)))
-        self.app.layout.focus(self.ask_window)
+        self.app.layout.focus(self.shell_ask_window if shell else self.ask_window)
         if self.vi:
             self.app.vi_state.input_mode = InputMode.INSERT
 
@@ -2053,6 +2100,8 @@ class App:
             self.app.vi_state.input_mode = InputMode.NAVIGATION
         if answer is None:
             self.say("")
+            if ask.get("cancel"):
+                ask["cancel"]()
         else:
             ask["done"](answer)
 
@@ -2665,18 +2714,33 @@ class App:
             self.app.invalidate()
 
     def _panel_width(self) -> int:
-        if self.panel.tab.name == "monitor":
+        name = self.panel.tab.name
+        if name == "monitor":
             return max(PANEL_WIDTH, get_app().output.get_size().columns // 2)
-        return self._trace_width()
+        if name == "trace":
+            return self._trace_width()
+        return max(PANEL_WIDTH, min(TRACE_WIDTH, get_app().output.get_size().columns // 2))
 
     def _trace_width(self) -> int:
-        """Wide enough for a plan, but never more than half the screen."""
-        return max(PANEL_WIDTH, min(TRACE_WIDTH, get_app().output.get_size().columns // 2))
+        """Half the screen, as the monitor. With DISPLAY_CURSOR's table on (`r`), as wide as
+        that table, leaving the shell 40 columns."""
+        columns = get_app().output.get_size().columns
+        width = max(PANEL_WIDTH, columns // 2)
+        shown = self._session.shown
+        if self.trace_raw and shown is not None and shown.trace:
+            need = trace_raw_width(shown.trace) + 4  # the line's spaces and the scrollbar
+            width = max(width, min(need, columns - 40))
+        return width
+
+    def _trace_toggle_raw(self) -> None:
+        self.trace_raw = not self.trace_raw
+        self.say("trace: DISPLAY_CURSOR as its table" if self.trace_raw else "trace: plan as a tree")
+        self.app.invalidate()
 
     def _trace_items(self):
         s, shown = self._session, self._session.shown
         if shown is not None and shown.trace:
-            return [(frags, "", "") for frags in render_trace(shown.trace)]
+            return [(frags, "", "") for frags in render_trace(shown.trace, raw=self.trace_raw)]
         if s.profile.type != "oracle":
             return [("Trace works on Oracle connections only", "class:list.note", "")]
         state = "autotrace on" if s.autotrace else "autotrace off"
@@ -3131,6 +3195,10 @@ class App:
         @kb.add("c-pagedown")
         def _(event):
             self.results.page(1)
+
+        @kb.add(SHIFT_SPACE)
+        def _(event):  # no binding of its own: handled exactly as a plain Space
+            event.app.key_processor.feed(KeyPress(" ", " "), first=True)
 
         @kb.add("f7")
         def _(event):
@@ -3711,6 +3779,27 @@ class App:
         except Exception:
             pass
 
+    async def _ask_binds(self, s: Session, names: list[str]) -> dict[str, str | None] | None:
+        """Each bind variable's value, asked one by one on the line under the panel with the
+        value last typed for it (this connection) filled in: Enter takes it, Esc drops the run.
+        Values bind as strings; `NULL` binds NULL. None when dropped."""
+        async with self._bind_lock:
+            values: dict[str, str | None] = {}
+            for i, name in enumerate(names):
+                answer: asyncio.Future = asyncio.get_running_loop().create_future()
+                self._ask_for(f":{name} =", s.binds.get(name.lower(), ""), lambda a: None,
+                              lambda a, f=answer: f.done() or f.set_result(a),
+                              lambda f=answer: f.done() or f.set_result(None), shell=True)
+                self.say(f"bind {i + 1}/{len(names)}: Enter takes the value (NULL for null), Esc drops the run")
+                self.app.invalidate()
+                text = await answer
+                if text is None:
+                    return None
+                s.binds[name.lower()] = text
+                values[name.lower()] = None if text.upper() == "NULL" else text
+            self.say("")
+            return values
+
     async def run_cell(self, s: Session, cell: Cell, text: str) -> None:
         """Run a cell's text and store the outcome on the cell (in place, also for re-runs)."""
         cell.running = True
@@ -3733,6 +3822,15 @@ class App:
                 pre = [("class:note", "".join(f"-- {l}\n" for l in sql.splitlines()))]
             else:
                 sql = prepare_statement(text, s.profile.type)
+            binds = None
+            names = bind_names(sql) if sql and s.profile.type in ("oracle", "sqlite") else []
+            if names:
+                binds = await self._ask_binds(s, names)
+                if binds is None:
+                    self.say("not run: no values for its bind variables")
+                    return
+                pre = pre + [("class:note", "".join(f"-- :{name} = {bind_shown(binds[name.lower()])}\n"
+                                                     for name in names))]
             n = cell.conn_index
             if n == 0 and not await self.ensure_connected(s):
                 self._remember(s, text)  # nothing says it is wrong: keep it
@@ -3764,9 +3862,9 @@ class App:
                 try:
                     if traced:
                         res, trace = await asyncio.get_running_loop().run_in_executor(
-                            None, db.execute_traced, sql)
+                            None, db.execute_traced, sql, binds)
                     else:
-                        res = await asyncio.get_running_loop().run_in_executor(None, db.execute, sql)
+                        res = await asyncio.get_running_loop().run_in_executor(None, db.execute, sql, binds)
                     err, bad = None, False
                 except Exception as e:  # driver errors are shown, not raised
                     res, err, bad = None, f"ERROR: {error_text(e)}".expandtabs(4), is_parse_error(e)

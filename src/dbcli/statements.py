@@ -17,6 +17,36 @@ READ_ONLY_RE = re.compile(r"\s*(?:/\*.*?\*/\s*|--[^\n]*\n\s*)*(select|with|value
 FOR_UPDATE_RE = re.compile(r"\bfor\s+update\b", re.I)
 
 
+# Bind variables (`:cust_dt`, `:1`) and what can hold a `:` that is not one: strings ('HH24:MI',
+# q'[…]'), quoted names, comments, Postgres' `::` casts. Matched in this order, left to right.
+BIND_SCAN_RE = re.compile(r"""
+    [nN]?[qQ]'(?:\[.*?\]|\{.*?\}|\(.*?\)|<.*?>|(?P<q>[^\s]).*?(?P=q))(?:'|\Z)  # Oracle q'[ ... ]'
+  | '(?:[^']|'')*'?                  # a string
+  | "[^"]*"?                         # a quoted name
+  | --[^\n]*                         # a comment to the end of the line
+  | /\*.*?(?:\*/|\Z)                 # a block comment (hints too)
+  | ::                               # a cast
+  | (?<![\w$#]):(?P<name>[A-Za-z][\w$#]*|\d+)
+""", re.S | re.X)
+# a stored unit's body cannot take binds; a trigger's :new / :old are not binds
+NO_BINDS_RE = re.compile(r"\s*create\s+(?:or\s+replace\s+)?(?:editionable\s+|noneditionable\s+)?"
+                         r"(?:trigger|procedure|function|package|type)\b", re.I)
+
+
+def bind_names(sql: str) -> list[str]:
+    """The statement's bind variables, in order, each once (Oracle matches them regardless of
+    case, so `:Cust_Dt` and `:CUST_DT` are one; the first spelling is kept)."""
+    if NO_BINDS_RE.match(sql):
+        return []
+    out, seen = [], set()
+    for m in BIND_SCAN_RE.finditer(sql):
+        name = m.group("name")
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            out.append(name)
+    return out
+
+
 PLSQL_START_RE = re.compile(r"\s*(?:declare|begin|create\s+(?:or\s+replace\s+)?(?:editionable\s+|noneditionable\s+)?"
                             r"(?:procedure|function|package|trigger|type\s+body))\b", re.I)
 OPEN_RE = re.compile(r"\bbegin\b|(?<!end )\bcase\b", re.I)

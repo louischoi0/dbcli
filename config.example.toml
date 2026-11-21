@@ -37,3 +37,4 @@ user = "scott"
 dsn = "localhost:1521/FREEPDB1"
 password = "tiger"
 # autocommit = false              # Oracle default: run `commit;` yourself
+# program = "sqlplus"             # the program name the server sees; for logon triggers that admit only known tools

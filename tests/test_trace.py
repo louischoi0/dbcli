@@ -21,10 +21,14 @@ class TraceTest(unittest.TestCase):
         self.assertEqual(stats_delta(before, warm, {n: 103 for n in STAT_NAMES})["redo size"], 0)  # never negative
 
     def test_format_trace(self):
-        lines = format_trace(["plan line"], {n: 1 for n in STAT_NAMES}, 3)
-        self.assertEqual(lines[:3], ["Execution Plan", "-" * 58, "plan line"])
+        lines = format_trace(["plan line"], {n: 1 for n in STAT_NAMES}, 3, actual=["actual line"], calls=["call line"])
+        titles = [l for i, l in enumerate(lines) if i + 1 < len(lines) and lines[i + 1] == "-" * 58]
+        # the estimated plan last, after the actual plan, the call table and the statistics
+        self.assertEqual(titles, ["Actual Plan (DISPLAY_CURSOR · ALLSTATS LAST)", "Call Statistics",
+                                  "Statistics", "Execution Plan"])
+        self.assertEqual(lines[-3:], ["Execution Plan", "-" * 58, "plan line"])
         self.assertIn("          1  consistent gets", lines)
-        self.assertEqual(lines[-1], "          3  rows processed")
+        self.assertIn("          3  rows processed", lines)
         no_stats = format_trace(None, None, 0, "(no plan)", "(no stats)")
         self.assertIn("(no plan)", no_stats)
         self.assertIn("(no stats)", no_stats)

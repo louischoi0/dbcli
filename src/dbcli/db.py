@@ -7,7 +7,9 @@ import sqlite3
 from dataclasses import dataclass
 
 from .config import Profile
-from .trace import CURSOR_GRANT, STATS_GRANT, STATS_SQL, explainable, format_trace, sql_id, stats_delta
+from .tkprof import format_call_stats, parse_call_stats
+from .trace import (CALLS_GRANT, CURSOR_GRANT, STATS_GRANT, STATS_PREV_SQL, STATS_SQL, TRACE_OFF, TRACE_ON,
+                    explainable, format_trace, sql_id, stats_delta)
 
 # Every statement dbcli sends on its own (catalog reads for completion and underlines, the
 # schema browser, the monitor, autotrace's helpers) starts with this comment, so the monitor
@@ -185,6 +187,14 @@ def _run_paged(cur, sql: str, *args) -> Result:
     return res
 
 
+class _AnyCase(dict):
+    """Bind values by lower-case name; SQLite looks `:Cust_Dt` up as written, so any spelling
+    finds its value (Oracle matches names regardless of case by itself)."""
+
+    def __missing__(self, key):
+        return dict.__getitem__(self, key.lower())
+
+
 class SqliteDB:
     kind = "sqlite"
 
@@ -197,8 +207,9 @@ class SqliteDB:
     def set_autocommit(self, on: bool) -> None:
         raise ValueError("SQLite here commits every statement; autocommit cannot be turned off")
 
-    def execute(self, sql: str) -> Result:
-        res = _run_paged(self._con.cursor(), sql.strip().rstrip(";"))
+    def execute(self, sql: str, binds: dict | None = None) -> Result:
+        args = (_AnyCase(binds),) if binds else ()
+        res = _run_paged(self._con.cursor(), sql.strip().rstrip(";"), *args)
         if not res.columns:
             self._con.commit()
         return res
@@ -303,8 +314,9 @@ class OracleDB:
         oracledb.defaults.fetch_lobs = False  # CLOB/BLOB come back as str/bytes
         o = p.options
         self.name = p.name
+        extra = {"program": o["program"]} if o.get("program") else {}  # some servers' logon triggers admit only known client programs
         self._con = oracledb.connect(user=o.get("user"), password=p.password(), dsn=o.get("dsn"),
-                                     tcp_connect_timeout=10)
+                                     tcp_connect_timeout=10, **extra)
         # Oracle convention: nothing is committed until you run `commit;`
         self.autocommit = bool(o.get("autocommit", False))
         self._con.autocommit = self.autocommit
@@ -314,37 +326,62 @@ class OracleDB:
         self._con.autocommit = on
         self.autocommit = on
 
-    def execute(self, sql: str) -> Result:
+    def execute(self, sql: str, binds: dict | None = None) -> Result:
+        """`binds`: bind variables' values by name (`cust_dt` for `:cust_dt`), None for NULL."""
         sql = sql.strip()
         if not PLSQL_RE.match(sql):
             sql = sql.rstrip(";")
-        return _run_paged(self._con.cursor(), sql)
+        return _run_paged(self._con.cursor(), sql, *((binds,) if binds else ()))
 
-    def execute_traced(self, sql: str) -> tuple[Result, list[str]]:
-        """Run like `execute` and also return autotrace's plan and statistics lines."""
+    def execute_traced(self, sql: str, binds: dict | None = None) -> tuple[Result, list[str]]:
+        """Run like `execute` and also return autotrace's plan and statistics lines. EXPLAIN
+        PLAN gets the bind values too (the driver checks every placeholder has one), but plans
+        the statement as written, without peeking at them."""
         sql = sql.strip()
         if not PLSQL_RE.match(sql):
             sql = sql.rstrip(";")
         with self._con.cursor() as cur:
             # row-source statistics for DISPLAY_CURSOR's A-Rows, for this statement only
             cur.execute(BG_MARK + "alter session set statistics_level = all")
+            ran = None  # (sql_id, child) of the run, as the server reports it
+            trace_file, start, calls_note = None, 0, ""
             try:
-                before = self._stats(cur)
-                warm = self._stats(cur) if before is not None else None
-                cur.execute(sql)
-                res = _fetch(cur)
-                after = self._stats(cur) if warm is not None else None
+                # all three readings the same query, so the cost of one is what warm - before says
+                query = STATS_PREV_SQL if self._stats(cur, STATS_PREV_SQL) is not None else STATS_SQL
+                # the 10046 trace spans the readings too, so turning it on and off stays out of
+                # the statistics; the call table picks the statement's own calls from it
+                try:
+                    trace_file, start = self._trace_position(cur)
+                    cur.execute(BG_MARK + TRACE_ON)
+                except Exception as e:
+                    trace_file, calls_note = None, f"(no call statistics: {str(e).splitlines()[0]})\n  {CALLS_GRANT}"
+                try:
+                    before = self._stats(cur, query)
+                    warm = self._stats(cur, query) if before is not None else None
+                    # not from the statement cache: the trace then holds its text (PARSING IN CURSOR)
+                    cur.prepare(sql, cache_statement=False)
+                    cur.execute(None, binds or {})
+                    res = _fetch(cur)
+                    after = self._stats(cur, query, prev := []) if warm is not None else None
+                    ran = prev[0] if prev else None
+                finally:
+                    if trace_file is not None:
+                        cur.execute(BG_MARK + TRACE_OFF)
             finally:
                 cur.execute(BG_MARK + "alter session set statistics_level = typical")
             stats = stats_delta(before, warm, after) if after is not None else None
+            calls = None
+            if trace_file is not None:
+                calls, calls_note = self._call_stats(cur, trace_file, start, sql)
             plan, plan_note, actual, actual_note = None, "", None, ""
             if explainable(sql):
-                actual, actual_note = self._actual_plan(cur, sql)
+                actual, actual_note = self._actual_plan(cur, sql, ran)
                 # EXPLAIN PLAN writes PLAN_TABLE: inside a savepoint it rolls back, so it neither
                 # leaves a transaction (and its lock) open nor touches the user's own changes
                 try:
                     cur.execute(BG_MARK + "savepoint dbcli_explain")
-                    cur.execute(BG_MARK + "explain plan for " + sql)
+                    # the driver wants a value for each placeholder; EXPLAIN PLAN itself does not use them
+                    cur.execute(BG_MARK + "explain plan for " + sql, binds or {})
                     cur.execute(BG_MARK + "select plan_table_output from table(dbms_xplan.display())")
                     plan = [r[0] or "" for r in cur.fetchall()]
                 except Exception as e:
@@ -355,32 +392,68 @@ class OracleDB:
                     except Exception:
                         pass
         stats_note = "" if stats is not None else f"(no statistics: v$mystat cannot be read)\n  {STATS_GRANT}"
-        return res, format_trace(plan, stats, res.rowcount, plan_note, stats_note, actual, actual_note)
+        return res, format_trace(plan, stats, res.rowcount, plan_note, stats_note, actual, actual_note,
+                                 calls, calls_note)
 
     @staticmethod
-    def _actual_plan(cur, sql: str) -> tuple[list[str] | None, str]:
-        """The plan the statement really ran with, from the cursor cache (its latest child)."""
-        sid = sql_id(sql)
+    def _trace_position(cur) -> tuple[str, int]:
+        """The session's trace file (its name, as V$DIAG_TRACE_FILE_CONTENTS has it) and how
+        many lines it holds now: what the next trace writes comes after that line."""
+        cur.execute(BG_MARK + "select value from v$diag_info where name = 'Default Trace File'")
+        name = os.path.basename(cur.fetchone()[0])
+        cur.execute(BG_MARK + "select nvl(max(line_number), 0) from v$diag_trace_file_contents "
+                    "where trace_filename = :f", f=name)
+        return name, int(cur.fetchone()[0])
+
+    @staticmethod
+    def _call_stats(cur, trace_file: str, start: int, sql: str) -> tuple[list[str] | None, str]:
+        """TKPROF's call table of the statement, from the trace lines written since `start`."""
         try:
-            cur.execute(BG_MARK + "select child_number from v$sql where sql_id = :i "
-                        "order by last_active_time desc, child_number desc fetch first 1 row only", i=sid)
-            row = cur.fetchone()
-            if row is None:
-                return None, f"(SQL_ID {sid} is not in the cursor cache)"
+            cur.execute(BG_MARK + "select payload from v$diag_trace_file_contents "
+                        "where trace_filename = :f and line_number > :s order by line_number", f=trace_file, s=start)
+            lines = [r[0] or "" for r in cur.fetchall()]
+        except Exception as e:
+            return None, f"(no call statistics: {str(e).splitlines()[0]})\n  {CALLS_GRANT}"
+        stats = parse_call_stats(lines, sql)
+        if stats is None:
+            return None, "(no call statistics: the statement is not in the 10046 trace)"
+        return format_call_stats(stats), ""
+
+    @staticmethod
+    def _actual_plan(cur, sql: str, ran: tuple[str, int] | None = None) -> tuple[list[str] | None, str]:
+        """The plan the statement really ran with, from the cursor cache: the cursor the server
+        said ran (`ran`), else the latest child of the SQL_ID hashed from the text."""
+        try:
+            if ran is not None:
+                sid, child = ran
+            else:
+                sid = sql_id(sql)
+                cur.execute(BG_MARK + "select child_number from v$sql where sql_id = :i "
+                            "order by last_active_time desc, child_number desc fetch first 1 row only", i=sid)
+                row = cur.fetchone()
+                if row is None:
+                    return None, f"(SQL_ID {sid} is not in the cursor cache)"
+                child = row[0]
             cur.execute(BG_MARK + "select plan_table_output from table(dbms_xplan.display_cursor(:i, :c, 'ALLSTATS LAST'))",
-                        i=sid, c=row[0])
+                        i=sid, c=child)
             return [r[0] or "" for r in cur.fetchall()], ""
         except Exception as e:
             return None, f"(no actual plan: {str(e).splitlines()[0]})\n  {CURSOR_GRANT} to <user>;"
 
     @staticmethod
-    def _stats(cur) -> dict[str, int] | None:
-        """The session's autotrace counters, or None without the privilege to read them."""
+    def _stats(cur, query: str = STATS_SQL, prev: list | None = None) -> dict[str, int] | None:
+        """The session's autotrace counters, or None without the privilege to read them. With
+        STATS_PREV_SQL, the previous statement's (sql_id, child) is appended to `prev`."""
         try:
-            cur.execute(BG_MARK + STATS_SQL)
-            return {name: int(value) for name, value in cur.fetchall()}
+            cur.execute(BG_MARK + query)
+            rows = cur.fetchall()
         except Exception:
             return None
+        if prev is not None and rows and len(rows[0]) > 2 and rows[0][2]:
+            sid, _, child = str(rows[0][2]).partition(":")
+            if sid and child.isdigit():
+                prev.append((sid, int(child)))
+        return {r[0]: int(r[1]) for r in rows}
 
     def object_names(self) -> set[str]:
         """Every table, view and synonym the user can see (DUAL, V$ views included), lower case."""

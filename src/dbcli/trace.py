@@ -26,11 +26,23 @@ STAT_NAMES = (
 )
 STATS_SQL = ("select n.name, s.value from v$mystat s join v$statname n on n.statistic# = s.statistic# "
              "where n.name in (" + ", ".join(f"'{n}'" for n in STAT_NAMES) + ")")
+# The same counters, each row also carrying the session's previous statement (SQL_ID:child).
+# Read right after the traced run, that is the run itself, as the server named it: no need to
+# hash the text, whose bytes are in the database's character set (KO16MSWIN949, …), not UTF-8.
+STATS_PREV_SQL = ("select n.name, s.value, (select prev_sql_id || ':' || prev_child_number from v$session "
+                  "where sid = sys_context('userenv', 'sid')) from v$mystat s join v$statname n "
+                  "on n.statistic# = s.statistic# where n.name in (" + ", ".join(f"'{n}'" for n in STAT_NAMES) + ")")
 STATS_GRANT = "grant select on v_$mystat to <user>;  -- as SYS (v_$statname too)"
+# TKPROF's call table: a 10046 trace around the run, read back from the session's trace file
+TRACE_ON = "alter session set events '10046 trace name context forever, level 8'"
+TRACE_OFF = "alter session set events '10046 trace name context off'"
+CALLS_GRANT = "grant alter session to <user>; grant select on v_$diag_info, v_$diag_trace_file_contents to <user>;"
 CURSOR_GRANT = "grant select on v_$sql, v_$sql_plan, v_$sql_plan_statistics_all, v_$session"
 SQL_ID_ALPHABET = "0123456789abcdfghjkmnpqrstuvwxyz"
 
-EXPLAINABLE_RE = re.compile(r"\s*(select|with|insert|update|delete|merge)\b", re.I)
+# leading `-- …` lines and `/* … */` comments are skipped (a `/*+ hint */` only follows the keyword)
+EXPLAINABLE_RE = re.compile(r"\s*(?:--[^\n]*(?:\n|\Z)\s*|/\*.*?\*/\s*)*(select|with|insert|update|delete|merge)\b",
+                            re.I | re.S)
 
 
 def explainable(sql: str) -> bool:
@@ -61,17 +73,22 @@ def stats_delta(before: dict[str, int], warm: dict[str, int], after: dict[str, i
 
 def format_trace(plan: list[str] | None, stats: dict[str, int] | None, rows: int,
                  plan_note: str = "", stats_note: str = "", actual: list[str] | None = None,
-                 actual_note: str = "") -> list[str]:
-    """The panel's lines, laid out like SQL*Plus autotrace output, the actual plan after the estimate."""
-    out = ["Execution Plan", RULE]
-    out += plan if plan else (plan_note or "(no execution plan for this statement)").splitlines()
+                 actual_note: str = "", calls: list[str] | None = None, calls_note: str = "") -> list[str]:
+    """The panel's lines: the actual plan, TKPROF's call table (Parse / Execute / Fetch), the
+    session statistics as SQL*Plus autotrace lists them, and the estimated plan last."""
+    out: list[str] = []
     if actual or actual_note:
-        out += ["", "Actual Plan (DISPLAY_CURSOR · ALLSTATS LAST)", RULE]
-        out += actual if actual else actual_note.splitlines()
-    out += ["", "Statistics", RULE]
+        out += ["Actual Plan (DISPLAY_CURSOR · ALLSTATS LAST)", RULE]
+        out += (actual if actual else actual_note.splitlines()) + [""]
+    if calls or calls_note:
+        out += ["Call Statistics", RULE]
+        out += (calls if calls else calls_note.splitlines()) + [""]
+    out += ["Statistics", RULE]
     if stats is None:
         out += (stats_note or "(statistics could not be read)").splitlines()
     else:
         out += [f"{stats[name]:>11}  {name}" for name in STAT_NAMES]
     out.append(f"{rows:>11}  rows processed")
+    out += ["", "Execution Plan", RULE]
+    out += plan if plan else (plan_note or "(no execution plan for this statement)").splitlines()
     return out

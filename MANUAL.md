@@ -90,7 +90,7 @@ The top bar, the shell on the left, the panel on the right, and the result pane 
 |---|---|
 | Top bar | From the left: vim mode, connection state (●), connection name, online state, the latest message, the **autocommit** and **autotrace** switches with their keys, and the target. A narrow terminal cuts from the right, so the important parts come first. The right end lists the main keys. |
 | Shell | The `> ` input area works **like a text editor**: Enter is a new line and **Ctrl-O** runs. A cell of several lines ends with `_ ` on its last line, so `>` … `_` mark where each block starts and ends. The shell keeps each statement run and a short outcome (`(2 rows)`, `OK, 3 row(s) affected`, errors). |
-| Panel | One panel with the **History / Schema / Trace / Monitor / Bookmark / AI / Settings** tabs (`Alt-1` to `Alt-7`). The panel is as wide as a plan needs on every tab (at most 96 columns, half the screen), so switching tabs never moves the shell. The first tab shown is `[ui] panel` (section 7). |
+| Panel | One panel with the **History / Schema / Trace / Monitor / Bookmark / AI / Settings** tabs (`Alt-1` to `Alt-7`). The panel is 96 columns wide (at most half the screen) on most tabs; Trace and Monitor take half the screen, for their wide plans and tables. The first tab shown is `[ui] panel` (section 7). |
 | Result | The latest result as a **boxed table**. Each header cell has the column name on the left and its type on the right (`N` number, `VCH` varchar2, `CH` char, `CL` clob, `BB` blob, `R` raw, `D` date, `T` timestamp, `TZ` timestamp with time zone, `RID` rowid …; Oracle only), the type in a toned-down shade of its values' color. Values are colored by the column's type (numbers green, text yellow, dates lavender, binary teal, booleans orange), numbers right-aligned, NULL dimmed, every other row shaded. Cells are cut at 40 columns with `…`, line breaks show as `↵`. |
 
 Connection state in the top bar:
@@ -112,7 +112,7 @@ Panel tabs:
 | Bookmark | Saved queries (section 5.4), one to a line: id, `@alias` (a template), query, and the memo at the right end. Enter puts it in the prompt, `e` edits it right in the panel (vi keys, `:wq`); `a` adds, `A` (or `Ctrl-R` in a cell) bookmarks the current cell, `t` sets the alias, `d` deletes. |
 | AI | Questions about SQL to Claude, answered in the tab (section 6.4). |
 | Settings | Settings in one place (section 6.5); for now the color theme. |
-| Trace | With autotrace on (Oracle): the run's **estimated plan** (EXPLAIN PLAN + DBMS_XPLAN), **actual plan** (DISPLAY_CURSOR `ALLSTATS LAST`) and **session statistics**, drawn as a tree (section 6.1). It shows the trace of the cell focused in the shell. |
+| Trace | With autotrace on (Oracle): the run's **estimated plan** (EXPLAIN PLAN + DBMS_XPLAN), **actual plan** (DISPLAY_CURSOR `ALLSTATS LAST`), **call statistics** (TKPROF's Parse / Execute / Fetch table, from a 10046 trace) and **session statistics**, drawn as a tree (section 6.1). It shows the trace of the cell focused in the shell. |
 
 Colors follow the theme (Settings tab, `Alt-7`); the default, **Sky**, is soft grays with sky blue: the focused pane's title (the selected tab in the panel), the prompt, table headers and `online` are sky blue; `connected` in the top bar's message is green; only offline and errors are red. Orange marks `conn0` in a cell's prompt, an `off` switch in the top bar (`autocommit off`, `autotrace off`) and the numbers in the panel (History's run numbers, Bookmark's ids). Ctrl-B hides the panel so the shell takes the full width.
 The layout follows the terminal's size. Panes, tabs, list items and the two switches in the top bar can be clicked.
@@ -204,7 +204,7 @@ Editing works on the result of a query on one plain table (no join, subquery, un
 | `1` … `7` | History / Schema / Trace / Monitor / Bookmark / AI / Settings |
 | `j` / `k`, `↓` / `↑` | Moves the selection |
 | `g` / `G`, `Home` / `End` | Top / bottom |
-| `PageUp` / `PageDown` | Scroll the panel a screen at a time, **wherever the focus is** (the prompt, the result pane, the panel) |
+| `PageUp` / `PageDown` (or `Ctrl+F11` / `Ctrl+F12`) | Scroll the panel a screen at a time, **wherever the focus is** (the prompt, the result pane, the panel). `Ctrl+F11` / `Ctrl+F12` act as `PageUp` / `PageDown` everywhere, for keyboards that lack those keys |
 | `Ctrl-U` / `Ctrl-D`, mouse wheel | Scroll half a screen / a line while the panel has focus; a scrollbar shows on the right |
 | `Enter`, click | Uses the selected item (below) |
 
@@ -370,6 +370,7 @@ The file is shared by every dbcli terminal: a change made in one shows in the ot
 - **Ctrl-O** (or Alt+Enter, F5, Ctrl+Enter) sends the **whole** input area as one statement. No `;` needed at the end.
 - A cell runs in place: its result shows under it and the cursor stays. **Ctrl-N** adds an empty cell right below the one under the cursor (at the bottom it becomes the new input cell), for the next statement. The statement also goes to the History tab, unless the database rejected it as a syntax or parse error (Oracle ORA-009xx such as ORA-00900, 00904, 00933, 00942, and PL/SQL compile errors; PostgreSQL SQLSTATE class 42; SQLite syntax and "no such" errors). Such a statement is not learned by the suggestions either. Other errors (a constraint, a lost connection) are kept.
 - Send one statement at a time: several joined with `;` make the database report an error.
+- **Bind variables** (`:cust_dt`, `:1`; Oracle and SQLite): running a statement that has them asks each one's value on a line under the shell (the cells), `:cust_dt =`, one after another. The value typed last for that name on this connection is filled in, so Enter alone uses it again; **Esc** drops the run. A value binds as a **string** (Oracle converts it where the column needs a number; for a date write `to_date(:cust_dt, 'YYYYMMDD')`), and `NULL` binds NULL. What was bound shows above the result (`-- :cust_dt = '20240101'`). A `:` inside a string (`'HH24:MI'`), a quoted name or a comment is not a bind, nor are a trigger's `:new` / `:old`. With autotrace on, the plans and call statistics are of the statement as run with these values.
 - **Oracle PL/SQL blocks** run as they are. A last line of `/`, as in SQL*Plus scripts, is dropped.
 
   ```sql
@@ -392,6 +393,18 @@ The file is shared by every dbcli terminal: a change made in one shows in the ot
 It is **on from the start**; **F8** (or a click on `autotrace` in the top bar) turns it off and on again. Run a statement with it on and the Trace tab opens with:
 
 ```
+▌ Actual Plan · DISPLAY_CURSOR   r: table
+  …                                       estimated 200 · actual 400 · buffers 5 · 0.01s
+
+▌ Call Statistics · 10046 (tkprof)
+  call      count       cpu    elapsed       disk      query    current       rows
+  …
+  total         4      0.00       0.00          0          7          0          3
+
+▌ Statistics
+          7  consistent gets
+          3  rows processed
+
 ▌ Execution Plan · estimated
   Plan hash value: 2344062168
   0  SELECT STATEMENT                                      rows 1 · cost 5
@@ -404,17 +417,13 @@ It is **on from the start**; **F8** (or a click on `autotrace` in the top bar) t
 
   Predicates
   5  access("D"."ID"=2 OR "D"."ID"=3)
-
-▌ Actual Plan · DISPLAY_CURSOR
-  …                                       estimated 200 · actual 400 · buffers 5 · 0.01s
-
-▌ Statistics
-          7  consistent gets
-          3  rows processed
 ```
 
+The sections come in that order: what the run really did first, the estimated plan last.
+
 - **Estimated plan:** EXPLAIN PLAN + DBMS_XPLAN.DISPLAY, with `rows · cost`.
-- **Actual plan:** DBMS_XPLAN.DISPLAY_CURSOR `ALLSTATS LAST` with `estimated` (estimated rows) and `actual` (actual rows, its label in bold orange), then buffers and time. The traced statement alone runs with `statistics_level = all`, so no `gather_plan_statistics` hint is needed. An actual row count 10 times or more off the estimate is highlighted.
+- **Actual plan:** DBMS_XPLAN.DISPLAY_CURSOR `ALLSTATS LAST` with `estimated` (estimated rows) and `actual` (actual rows, its label in bold orange), then buffers and time. The traced statement alone runs with `statistics_level = all`, so no `gather_plan_statistics` hint is needed. An actual row count 10 times or more off the estimate is highlighted. **`r`** in the Trace tab switches this section to DBMS_XPLAN's own table and back (`r: table` / `r: tree` beside the heading): every column it printed (Starts, E-Rows, A-Rows, A-Time, Buffers, Reads, OMem, 1Mem, Used-Mem), the statement text and the predicates as SQL*Plus shows them. While the table shows, the panel widens to fit it, leaving the shell 40 columns.
+- **Call Statistics:** TKPROF's call table of the statement: `call / count / cpu / elapsed / disk / query / current / rows` for **Parse, Execute and Fetch**, then `total`, and under it one `recursive` line with the recursive SQL it caused (dep > 0; on a hard parse, the data dictionary reads). cpu and elapsed are seconds, as TKPROF prints them; disk = physical reads, query = consistent gets, current = db block gets. It comes from a 10046 SQL trace (level 8) on around the run and read back from the session's own trace file through V$DIAG_TRACE_FILE_CONTENTS, so no file on the server is needed. The traced statement is not taken from the statement cache, so it is parsed on every run (`Parse 1`, as for a statement typed into SQL*Plus). It needs `alter session` and select on `v_$diag_info` and `v_$diag_trace_file_contents`; without them the section says so, with the grants, and the rest of autotrace is as before.
 - **Statistics:** the session's V$MYSTAT counters over the statement, as SQL*Plus autotrace lists them; zeros are dimmed; **recursive calls, consistent gets and rows processed** stand out, the name in bold ivory and the value in bold orange (zeros too), physical reads, db block gets and redo size stand out in blue.
 - Operations are drawn as a tree (`├─ └─ │`), `*` marks a step with a predicate, and each kind of operation has its own color:
 
@@ -605,6 +614,7 @@ password = "tiger"
 | `password` | | password (plain text) | the same |
 | `password_env` | | an environment variable to read the password from instead | the same |
 | `autocommit` | | default `true` | default `false` |
+| `program` | | | the client program name the server sees (e.g. `"sqlplus"`), for logon triggers that refuse unknown tools with `ORA-20001: Connect is not allowed!` |
 
 **Adding connections, and the default:** add a new connection at the bottom as `[connections.name]`. `./dbcli` with no name opens the lowest one; `./dbcli --list` shows them all. `[ui] panel = "connections"` from older configs opens History.
 

@@ -38,7 +38,10 @@ KEY_STATS = {"consistent gets", "physical reads", "db block gets", "redo size"}
 IVORY_STATS = {"recursive calls", "consistent gets", "rows processed"}  # the name bold ivory, the value bold orange
 STAT_RE = re.compile(r"^\s*(\d+)\s{2}(.+)$")
 PREDICATE_RE = re.compile(r"^(\s*)(\d+)\s-\s(access|filter)(.*)$")
-SECTION_TITLES = {"Execution Plan": "Execution Plan · estimated", "Statistics": "Statistics"}
+SECTION_TITLES = {"Execution Plan": "Execution Plan · estimated", "Statistics": "Statistics",
+                  "Call Statistics": "Call Statistics · 10046 (tkprof)"}
+CALL_FIGURE_RE = re.compile(r"\d+(?:\.\d+)?")
+CALL_LABELS = ("Parse", "Execute", "Fetch", "total", "recursive")
 
 
 def operation_style(operation: str) -> str:
@@ -237,17 +240,82 @@ def _sections(lines: list[str]) -> list[tuple[str, list[str]]]:
     return out
 
 
-def render(lines: list[str]) -> list[Fragments]:
+def _raw(block: list[str]) -> list[Fragments]:
+    """DBMS_XPLAN's own text, every column as it printed it: the table's header and rules
+    toned, the rows and predicates as they are."""
+    out: list[Fragments] = []
+    for line in block:
+        bare = line.strip()
+        if bare and set(bare) <= {"-"}:
+            out.append([("class:trace.dim", line)])
+        elif bare.startswith("| Id"):
+            out.append([("class:trace.subtitle", line)])
+        elif bare.startswith(("SQL_ID", "Plan hash value")):
+            out.append([("class:trace.dim", line)])
+        else:
+            out.append([("class:trace.value", line)])
+    return out
+
+
+def _calls(block: list[str]) -> list[Fragments]:
+    """TKPROF's table as tkprof.format_call_stats laid it out, column for column: each figure
+    gets a style of its own, the spaces between stay as they are, so the columns still line up."""
+    out: list[Fragments] = []
+    for line in block:
+        bare = line.strip()
+        label = bare.split(" ", 1)[0] if bare else ""
+        if not bare:
+            out.append([])
+        elif set(bare) <= {"-", " "}:
+            out.append([("class:trace.dim", f"  {line}")])
+        elif label == "call":
+            out.append([("class:trace.subtitle", f"  {line}")])
+        elif label in CALL_LABELS:
+            strong = label == "total"
+            frags: Fragments = [("", "  "), ("class:trace.strong" if strong else "class:trace.statname",
+                                            line[:len(label)])]
+            at = len(label)
+            for m in CALL_FIGURE_RE.finditer(line, at):
+                frags.append(("", line[at:m.start()]))
+                zero = float(m.group(0)) == 0
+                frags.append(("class:trace.dim" if zero else
+                              "class:trace.strong" if strong else "class:trace.value", m.group(0)))
+                at = m.end()
+            out.append(frags + [("", line[at:])])
+        else:  # a note: no privilege, no trace
+            out.append([("class:trace.warn" if bare.startswith("(") else "class:trace.dim", f"  {bare}")])
+    return out
+
+
+def raw_width(lines: list[str]) -> int:
+    """How wide the DISPLAY_CURSOR text is, as `render(raw=True)` shows it (0: none)."""
+    return max((get_cwidth(l) for title, body in _sections(lines) if title.startswith("Actual Plan")
+                for l in body), default=0)
+
+
+def render(lines: list[str], raw: bool = False) -> list[Fragments]:
+    """`raw`: the DISPLAY_CURSOR section as DBMS_XPLAN's table, instead of the tree."""
     out: list[Fragments] = []
     for title, body in _sections(lines):
         while body and not body[-1].strip():
             body = body[:-1]
-        if title.startswith("Actual Plan"):
+        actual = title.startswith("Actual Plan")
+        if actual:
             heading = "Actual Plan · DISPLAY_CURSOR"
         else:
             heading = SECTION_TITLES.get(title, title)
-        out.append([("class:trace.bar", "▌"), ("class:trace.title", f" {heading}")])
-        out += _stats(body) if title == "Statistics" else _plan(body)
+        head = [("class:trace.bar", "▌"), ("class:trace.title", f" {heading}")]
+        if actual and _parse_table(body) is not None:
+            head.append(("class:trace.dim", "   r: tree" if raw else "   r: table"))
+        out.append(head)
+        if title == "Statistics":
+            out += _stats(body)
+        elif title == "Call Statistics":
+            out += _calls(body)
+        elif actual and raw:
+            out += _raw(body)
+        else:
+            out += _plan(body)
         out.append([])
     while out and not out[-1]:
         out.pop()

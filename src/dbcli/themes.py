@@ -80,6 +80,7 @@ def style_dict(c: dict) -> dict[str, str]:
         "hint.frame": f"{c['symbol']} bold",  # the /*+ and */ around them: as other symbols
         "symbol": f"{c['symbol']} bold",  # , ( ) + - * / | = < > …
         "hint.arg": c["hint_arg"],  # what a hint names in its parentheses: aliases, indexes, @query blocks
+        "comment": f"{dim} italic nobold",  # `-- …` to the end of the line
         "missing": "#ff6b6b underline",  # a table, view or column the database does not have
         "relation missing": "#ff6b6b bold underline",  # a missing table stays bold, as relation names are
         "prompt": f"{accent} bold",
