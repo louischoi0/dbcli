@@ -17,10 +17,13 @@ from .trace import (CALLS_GRANT, CURSOR_GRANT, STATS_GRANT, STATS_PREV_SQL, STAT
 BG_MARK = "/* dbcli:bg */ "
 
 MAX_ROWS = 1000  # a traced run fetches this many at most
+# the SQL_ID of autotrace's own counter reading (ASCII: the client's hash is the server's)
+OWN_STATS_ID = sql_id(BG_MARK + STATS_PREV_SQL)
 PAGE_ROWS = 500  # a query's first fetch; scrolling down fetches the next pages from its open cursor
-# PL/SQL needs its trailing ';', plain SQL sent to Oracle must not have one.
+# PL/SQL needs its trailing ';', plain SQL sent to Oracle must not have one. Comments may lead.
 PLSQL_RE = re.compile(
-    r"\s*(begin|declare|create\s+(or\s+replace\s+)?(procedure|function|package|trigger|type))\b", re.I)
+    r"(?:\s+|--[^\n]*(?:\n|\Z)|/\*.*?\*/)*(begin|declare|create\s+(or\s+replace\s+)?(procedure|function|package|trigger|type))\b",
+    re.I | re.S)
 
 
 # Errors that mean the statement itself is wrong (syntax, or a name the parser cannot resolve):
@@ -354,7 +357,7 @@ class OracleDB:
                     trace_file, start = self._trace_position(cur)
                     cur.execute(BG_MARK + TRACE_ON)
                 except Exception as e:
-                    trace_file, calls_note = None, f"(no call statistics: {str(e).splitlines()[0]})\n  {CALLS_GRANT}"
+                    trace_file, calls_note = None, self._calls_note(e, self._con.username)
                 try:
                     before = self._stats(cur, query)
                     warm = self._stats(cur, query) if before is not None else None
@@ -369,6 +372,10 @@ class OracleDB:
                         cur.execute(BG_MARK + TRACE_OFF)
             finally:
                 cur.execute(BG_MARK + "alter session set statistics_level = typical")
+            # the server's prev_sql_id is not always the run: with its fetch left unfinished
+            # (a result cut at the row limit) Oracle 23ai reports dbcli's own statistics query.
+            # The server hashes the text itself (in its own character set): the run is that id.
+            ran = self._ran_cursor(cur, sql, ran)
             stats = stats_delta(before, warm, after) if after is not None else None
             calls = None
             if trace_file is not None:
@@ -396,6 +403,37 @@ class OracleDB:
                                  calls, calls_note)
 
     @staticmethod
+    def _calls_note(error: Exception, user: str | None) -> str:
+        """Why the call table is missing, and the grant that brings it (for this user)."""
+        text = str(error).splitlines()[0]
+        if "ORA-00942" in text or "ORA-01031" in text:
+            m = re.search(r'"SYS"\."(G?V_\$\w+)"', text)
+            text = f"{user or 'this user'} cannot read {(m.group(1) if m else 'V_$DIAG_TRACE_FILE_CONTENTS').replace('V_$', 'V$')}"
+        return f"(no call statistics: {text})\n  as SYS: {CALLS_GRANT.replace('<user>', user or '<user>')}"
+
+    @staticmethod
+    def _ran_cursor(cur, sql: str, ran: tuple[str, int] | None) -> tuple[str, int] | None:
+        """(sql_id, child) of the statement that ran: `ran` (prev_sql_id) when it is the
+        statement's own SQL_ID, else the statement's latest child in V$SQL. None: not known
+        (the caller then hashes the text on the client)."""
+        import oracledb
+        try:
+            cur.setinputsizes(t=oracledb.DB_TYPE_CLOB)
+            cur.execute(BG_MARK + "select dbms_sql_translator.sql_id(:t) from dual", t=sql)
+            sid = cur.fetchone()[0]
+        except Exception:
+            return ran if ran is not None and ran[0] != OWN_STATS_ID else None
+        if ran is not None and ran[0] == sid:
+            return ran
+        try:
+            cur.execute(BG_MARK + "select child_number from v$sql where sql_id = :i "
+                        "order by last_active_time desc, child_number desc fetch first 1 row only", i=sid)
+            row = cur.fetchone()
+        except Exception:
+            row = None
+        return (sid, int(row[0])) if row is not None else (sid, 0)
+
+    @staticmethod
     def _trace_position(cur) -> tuple[str, int]:
         """The session's trace file (its name, as V$DIAG_TRACE_FILE_CONTENTS has it) and how
         many lines it holds now: what the next trace writes comes after that line."""
@@ -413,7 +451,7 @@ class OracleDB:
                         "where trace_filename = :f and line_number > :s order by line_number", f=trace_file, s=start)
             lines = [r[0] or "" for r in cur.fetchall()]
         except Exception as e:
-            return None, f"(no call statistics: {str(e).splitlines()[0]})\n  {CALLS_GRANT}"
+            return None, OracleDB._calls_note(e, cur.connection.username)
         stats = parse_call_stats(lines, sql)
         if stats is None:
             return None, "(no call statistics: the statement is not in the 10046 trace)"

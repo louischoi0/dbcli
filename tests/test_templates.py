@@ -141,9 +141,9 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(t.names(), [])  # no @alias: not callable
         self.assertFalse(t)
         self.assertEqual([x.label for x in t.entries()], ["active sessions"])
-        t.update(b.id, alias="act")
+        t.update(b.id, alias="act", kind="template")  # moved to the Template page (M), with a name
         self.assertEqual(Templates(path=self.path).expand("@act"), b.body)
-        t.update(b.id, alias=None)
+        t.update(b.id, alias=None, kind="bookmark")
         self.assertEqual(Templates(path=self.path).names(), [])
         self.assertIsNone(t.check_alias(None))
 
@@ -162,6 +162,68 @@ class StoreTest(unittest.TestCase):
             {"id": 1, "name": "a", "alias": "a", "body": "select 1"},  # filled from the alias: no memo
             {"id": 2, "name": "my query", "alias": None, "body": "select 2"}]}))
         self.assertEqual([x.memo for x in Templates(path=self.path).entries()], ["", "my query"])
+
+
+class KindsAndMacrosTest(unittest.TestCase):
+    def setUp(self):
+        self.path = Path(tempfile.mkdtemp()) / "bookmarks.json"
+        self.t = Templates({}, path=self.path)
+
+    def test_dollar_is_text_colon_is_bound(self):
+        self.t.add("select * from emp where deptno = :1 and job = $2", alias="emp", kind="template")
+        sql, binds = self.t.expand_call("@emp 10 'CLERK'")
+        self.assertEqual(sql, "select * from emp where deptno = :1 and job = 'CLERK'")  # $2 as written
+        self.assertEqual(binds, {"1": "10"})
+        self.assertEqual(self.t.arity("emp"), 2)
+
+    def test_a_bound_argument_loses_its_quotes(self):
+        self.t.add("select :1 v from dual", alias="q", kind="macro")
+        self.assertEqual(self.t.expand_macro("(q 'kim lee')")[1], {"1": "kim lee"})
+        self.assertEqual(self.t.expand_macro("(q 'it''s')")[1], {"1": "it's"})
+
+    def test_a_macro_call_is_the_whole_cell(self):
+        self.t.add("select $1 x from dual", alias="m", kind="macro")
+        self.assertEqual(self.t.expand_macro("(m 5)"), ("select 5 x from dual", {}))
+        self.assertEqual(self.t.expand_macro("  ( m 5 ) ; "), ("select 5 x from dual", {}))
+        self.assertIsNone(self.t.expand_macro("select (m 5) from dual"))  # not alone: SQL
+        self.assertIsNone(self.t.expand_macro("(select 1 from dual)"))  # no macro of that name
+        with self.assertRaises(TemplateError):
+            self.t.expand_macro("(m)")  # needs one argument
+
+    def test_a_macro_name_may_start_with_a_star_and_be_korean(self):
+        self.t.add("select count(*) from $1", alias="*cnt", kind="macro")
+        self.t.add("select * from $1", alias="주문조회", kind="macro")
+        self.assertEqual(self.t.expand_macro("(*cnt 주문)"), ("select count(*) from 주문", {}))
+        self.assertEqual(self.t.expand_macro("(주문조회 고객)"), ("select * from 고객", {}))
+        self.assertEqual(self.t.macro_names("*"), ["*cnt"])
+        self.assertIsNotNone(self.t.check_alias("*x", kind="template"))  # a template's @name: no star
+
+    def test_names_are_matched_regardless_of_case(self):
+        self.t.add("select 1 from dual", alias="*tbl", kind="macro")
+        self.t.add("select $1 from dual", alias="range", kind="template")
+        self.assertEqual(self.t.expand_macro("(*TBL)"), ("select 1 from dual", {}))  # was sent as SQL: ORA-00928
+        self.assertEqual(self.t.expand_call("@RANGE 4"), ("select 4 from dual", {}))
+        self.assertEqual(self.t.macro_names("*T"), ["*tbl"])
+        self.assertIsNotNone(self.t.check_alias("*TBL", kind="macro"))  # one name, whatever its case
+
+    def test_templates_and_macros_have_names_of_their_own(self):
+        self.t.add("select 1", alias="same", kind="template")
+        self.t.add("select 2", alias="same", kind="macro")  # no clash: called differently
+        self.assertEqual(self.t.names(), ["same"])
+        self.assertEqual(self.t.macro_names(), ["same"])
+        with self.assertRaises(TemplateError):
+            self.t.add("select 3", alias="same", kind="macro")
+        with self.assertRaises(TemplateError):
+            self.t.add("select 4", kind="macro")  # a macro needs a name
+
+    def test_kinds_are_kept_and_old_files_take_them_from_the_alias(self):
+        self.path.write_text(json.dumps({"next_id": 3, "bookmarks": [
+            {"id": 1, "memo": "", "alias": "a", "body": "select $1"},
+            {"id": 2, "memo": "plain", "alias": None, "body": "select 2"}]}))
+        t = Templates(path=self.path)
+        self.assertEqual([(e.kind, e.alias) for e in t.entries()], [("template", "a"), ("bookmark", None)])
+        t.update(2, alias="two", kind="macro")  # M: a bookmark becomes a macro
+        self.assertEqual([(e.id, e.call) for e in Templates(path=self.path).entries("macro")], [(2, "(two)")])
 
 
 if __name__ == "__main__":

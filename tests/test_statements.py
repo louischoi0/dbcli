@@ -1,6 +1,46 @@
 import unittest
 
-from dbcli.statements import read_only, split, statement_at
+from dbcli.db import PLSQL_RE
+from dbcli.statements import read_only, script_statements, split, statement_at
+
+
+class ScriptTest(unittest.TestCase):
+    TEXT = """create table a (x number);
+-- a note above the next one
+insert into a values (1);
+-- the block
+begin
+  dbms_output.put_line('a;b');
+end;
+/
+create index ix on a (x);
+-- trailing note"""
+
+    def test_every_statement_in_order(self):
+        texts = [s.text for s in script_statements(self.TEXT)]
+        self.assertEqual(texts[0], "create table a (x number);")
+        self.assertEqual(texts[1], "-- a note above the next one\ninsert into a values (1);")  # its comment along
+        self.assertEqual(texts[2], "-- the block\nbegin\n  dbms_output.put_line('a;b');\nend;")  # whole, `;` inside
+        self.assertEqual(texts[3], "create index ix on a (x);")  # the `/` line is not part of it
+        self.assertEqual(len(texts), 4)  # the trailing comment is no statement
+
+    def test_offsets_point_into_the_cell(self):
+        for s in script_statements(self.TEXT):
+            self.assertEqual(self.TEXT[s.start:s.end], s.text)
+
+    def test_split_into_cells_loses_nothing_but_blanks(self):
+        from dbcli.statements import split_pieces
+        self.assertEqual(split_pieces(self.TEXT), [
+            "create table a (x number);",
+            "-- a note above the next one\ninsert into a values (1);",
+            "-- the block\nbegin\n  dbms_output.put_line('a;b');\nend;\n/",  # its `/` along
+            "create index ix on a (x);\n-- trailing note",  # the trailing comment with the last
+        ])
+        self.assertEqual(split_pieces("select 1 from dual"), ["select 1 from dual"])
+
+    def test_a_block_led_by_a_comment_keeps_its_semicolon(self):
+        self.assertTrue(PLSQL_RE.match("-- the job\n/* and */ begin null; end;"))
+        self.assertFalse(PLSQL_RE.match("-- begin\nselect 1 from dual"))
 
 
 class StatementAtTest(unittest.TestCase):

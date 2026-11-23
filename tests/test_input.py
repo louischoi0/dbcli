@@ -90,6 +90,17 @@ class TabTest(unittest.TestCase):
         self.assertEqual(tab_action("sel", "", self.ab, self.w), TabAction("accept", 0, "ect "))
         self.assertEqual(tab_action("sel", " *", self.ab, self.w), TabAction("accept", 0, "ect"))
 
+    def test_upper_case_completion_whatever_the_typing(self):
+        self.w.upper = True  # [ui] completion_case = "upper", the default
+        self.assertEqual(tab_action("sel", "", self.ab, self.w), TabAction("accept", 3, "SELECT "))  # prefix too
+        self.w.add_base("orders", 5)
+        self.assertEqual(self.w.candidates("ord", 2), ["ORDER", "ORDERS"])  # the menu
+        self.w.add_base("MyTable", 5)
+        self.assertEqual(tab_action("from my", "", self.ab, self.w), TabAction("accept", 2, "MyTable "))  # as stored
+        self.assertEqual(self.w.cased("fu", "full"), "FULL")  # hints
+        self.w.upper = False
+        self.assertEqual(self.w.cased("fu", "full"), "full")
+
     def test_accept_rewrites_prefix_for_mixed_case(self):
         self.w.add_base("MyTable", 5)
         self.assertEqual(tab_action("from my", "", self.ab, self.w), TabAction("accept", 2, "MyTable "))

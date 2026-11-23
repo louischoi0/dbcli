@@ -20,7 +20,7 @@ from .grid import DATE_TEXT_RE, is_number
 from .objects import SQL_WORDS, blank_noise, scan
 from .statements import read_only
 
-IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_$#]*\Z")
+IDENT_RE = re.compile(r"[^\W\d][\w$#]*\Z")
 # a query whose rows are not one table's rows, one for one
 NOT_UPDATABLE_RE = re.compile(r"\b(join|union|intersect|minus|except|group\s+by|having|distinct|unique|"
                               r"connect\s+by|pivot|unpivot|model)\b|\(\s*select\b|^\s*with\b", re.I)

@@ -20,10 +20,10 @@ from dataclasses import dataclass, field
 # comments and string literals become blanks of the same length, so offsets still match
 NOISE_RE = re.compile(r"'(?:[^']|'')*'?|--[^\n]*|/\*.*?(?:\*/|\Z)", re.S)
 LEAD_RE = re.compile(r"\b(from|join|into|update)\b", re.I)
-NAME_RE = re.compile(r'"[^"]*"|[A-Za-z_][\w$#]*(?:\s*\.\s*[A-Za-z_"][\w$#"]*)?(?:@[\w.$#]+)?')
-CTE_RE = re.compile(r"(?:\bwith\b|,)\s*([A-Za-z_][\w$#]*)\s*(?:\([^)]*\)\s*)?as\s*\(", re.I)
+NAME_RE = re.compile(r'"[^"]*"|[^\W\d][\w$#]*(?:\s*\.\s*[^\W\d"][\w$#"]*)?(?:@[\w.$#]+)?')
+CTE_RE = re.compile(r"(?:\bwith\b|,)\s*([^\W\d][\w$#]*)\s*(?:\([^)]*\)\s*)?as\s*\(", re.I)
 SPACE_RE = re.compile(r"\s*")
-ALIAS_RE = re.compile(r"\s+(?:as\s+)?([A-Za-z_][\w$#]*)", re.I)
+ALIAS_RE = re.compile(r"\s+(?:as\s+)?([^\W\d][\w$#]*)", re.I)
 # words that end a table reference instead of being its alias
 STOP = frozenset("""
 where join on inner left right full outer cross natural using group order having union
@@ -38,7 +38,7 @@ CHECKED_RE = re.compile(r"\s*(select|with|insert|update|delete|merge)\b", re.I)
 # constructs whose names are too free to judge: the whole statement is left alone
 OPAQUE_RE = re.compile(r"\b(pivot|unpivot|model|match_recognize|json_table|xmltable|lateral|"
                        r"apply|connect_by_root|returning)\b", re.I)
-WORD_RE = re.compile(r"(?<![\w$#.:@])([A-Za-z_][\w$#]*)(?:\s*\.\s*([A-Za-z_][\w$#]*))?(?![\w$#])")
+WORD_RE = re.compile(r"(?<![\w$#.:@])([^\W\d][\w$#]*)(?:\s*\.\s*([^\W\d][\w$#]*))?(?![\w$#])")
 SQL_WORDS = frozenset("""
 select from where and or not in is null like between exists case when then else end as on
 join inner left right full outer cross natural using group by order having union all minus
@@ -73,13 +73,31 @@ def blank_keep_quotes(sql: str) -> str:
 
 def _in_function_call(text: str, at: int) -> bool:
     """True when `at` is inside parentheses that are a call, not a subquery."""
-    stack: list[int] = []
-    for i, ch in enumerate(text[:at]):
-        if ch == "(":
-            stack.append(i)
-        elif ch == ")" and stack:
-            stack.pop()
-    return bool(stack) and not SUBQUERY_RE.match(text, stack[-1])
+    return _calls_at(text, [at])[0]
+
+
+def _calls_at(text: str, positions: list[int]) -> list[bool]:
+    """_in_function_call for each of the (ascending) positions, in one pass over the text
+    (a pass per position made a long cell, with a FROM on every few lines, slow)."""
+    out, stack, i = [], [], 0
+    for at in positions:
+        for j in range(i, at):
+            ch = text[j]
+            if ch == "(":
+                stack.append(j)
+            elif ch == ")" and stack:
+                stack.pop()
+        i = max(i, at)
+        out.append(bool(stack) and not SUBQUERY_RE.match(text, stack[-1]))
+    return out
+
+
+def _after_for(text: str, at: int) -> bool:
+    """`for` right before `at`, blanks between (SELECT … FOR UPDATE), read backwards."""
+    j = at
+    while j > 0 and text[j - 1].isspace():
+        j -= 1
+    return text[max(0, j - 3):j].lower() == "for" and (j < 4 or not (text[j - 4].isalnum() or text[j - 4] in "_$#"))
 
 
 @dataclass
@@ -94,11 +112,13 @@ def scan(sql: str, text: str | None = None) -> Scan:
     """The statement's table references, their aliases, and whether all of them were judged."""
     text = blank_noise(sql) if text is None else text
     out = Scan(ctes={m.group(1).lower() for m in CTE_RE.finditer(text)})
-    for lead in LEAD_RE.finditer(text):
+    leads = list(LEAD_RE.finditer(text))
+    in_call = _calls_at(text, [lead.start() for lead in leads])
+    for lead, called in zip(leads, in_call):
         keyword = lead.group(1).lower()
-        if keyword == "update" and re.search(r"\bfor\s*$", text[:lead.start()], re.I):
+        if keyword == "update" and _after_for(text, lead.start()):
             continue  # SELECT ... FOR UPDATE
-        if keyword == "from" and _in_function_call(text, lead.start()):
+        if keyword == "from" and called:
             continue  # extract(year from d), trim(x from s)
         pos, listing = lead.end(), keyword == "from"
         while True:
@@ -146,8 +166,8 @@ def scan(sql: str, text: str | None = None) -> Scan:
 
 
 TABLE_SLOT_RE = re.compile(
-    r"\b(?:(from)\s+(?:[A-Za-z_][\w$#.@]*(?:\s+(?:as\s+)?[A-Za-z_][\w$#]*)?\s*,\s*)*"
-    r"|(?:join|into|update)\s+)[A-Za-z_]?[\w$#]*$", re.I)
+    r"\b(?:(from)\s+(?:[^\W\d][\w$#.@]*(?:\s+(?:as\s+)?[^\W\d][\w$#]*)?\s*,\s*)*"
+    r"|(?:join|into|update)\s+)(?:[^\W\d][\w$#]*)?$", re.I)
 
 
 def in_table_slot(before: str) -> bool:
@@ -177,9 +197,9 @@ QUOTED_NAME_RE = re.compile(r'"[^"]*"?')
 
 def _select_aliases(text: str) -> set[str]:
     """Names a select list gives its expressions: `expr as x` and `expr x`."""
-    out = {m.group(1).lower() for m in re.finditer(r"\bas\s+([A-Za-z_][\w$#]*)", text, re.I)}
+    out = {m.group(1).lower() for m in re.finditer(r"\bas\s+([^\W\d][\w$#]*)", text, re.I)}
     # an implicit alias: a name right after an expression's end, then `,` or FROM
-    for m in re.finditer(r"([\w$#]+|[)'\]])\s+([A-Za-z_][\w$#]*)\s*(?=,|\bfrom\b)", text, re.I):
+    for m in re.finditer(r"([\w$#]+|[)'\]])\s+([^\W\d][\w$#]*)\s*(?=,|\bfrom\b)", text, re.I):
         before, name = m.group(1).lower(), m.group(2).lower()
         if (before not in SQL_WORDS or before in VALUE_WORDS) and name not in SQL_WORDS:
             out.add(name)

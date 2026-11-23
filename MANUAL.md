@@ -64,7 +64,7 @@ python3 -m venv .venv
 
 ## 3. Screen
 
-The top bar, the shell on the left, the panel on the right, and the result pane across the bottom (about 40% of the height).
+The top bar, the shell on the left, the panel on the right, and the result pane across the bottom (about 35% of the height).
 
 ```
  INSERT ● prod-ora online │ prod-ora: done │ autocommit off F7 │ autotrace on F8 │ oracle · scott@db:1521/ORCL
@@ -77,7 +77,7 @@ The top bar, the shell on the left, the panel on the right, and the result pane 
  (2 rows)                                    │
                                              │
  > ▏                                         │
-── Result · prod-ora · select id, name from customers where id < 3 (2 rows) ──
+━━ 2 rows ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  ┌────┬──────┐
  │ ID │ NAME │
  ├────┼──────┤
@@ -90,9 +90,9 @@ The top bar, the shell on the left, the panel on the right, and the result pane 
 |---|---|
 | Top bar | From the left: vim mode, connection state (●), connection name, online state, the latest message, the **autocommit** and **autotrace** switches with their keys, and the target. A narrow terminal cuts from the right, so the important parts come first. The right end lists the main keys. |
 | Shell | The `> ` input area works **like a text editor**: Enter is a new line and **Ctrl-O** runs. A cell of several lines ends with `_ ` on its last line, so `>` … `_` mark where each block starts and ends. The shell keeps each statement run and a short outcome (`(2 rows)`, `OK, 3 row(s) affected`, errors). |
-| Pages | The tab line above the shell: **pages**, each a stack of cells of its own (`1 main │ 2 page2 │ +`). **Ctrl-T** adds a page after the one shown, **Alt+← / Alt+→** (any mode) or **gT / gt** (vim NORMAL; `3gt` page 3) go to the previous / next, a click on a tab shows it, `+` adds one. The Ctrl-P palette also has **Close page** and **Rename page**. Each page keeps its cells, its focus and its last result (the result pane shows the page's own); a statement still running when you move on finishes on its page, whose tab shows `…` meanwhile. Closing a page drops its cells (the statements it ran stay in History); the last page stays. F1's snapshot keeps every page. |
-| Panel | One panel with the **History / Schema / Trace / Monitor / Bookmark / AI / Settings** tabs (`Alt-1` to `Alt-7`). The panel is 96 columns wide (at most half the screen) on most tabs; Trace and Monitor take half the screen, for their wide plans and tables. The first tab shown is `[ui] panel` (section 7). |
-| Result | The latest result as a **boxed table**. Each header cell has the column name on the left and its type on the right (`N` number, `VCH` varchar2, `CH` char, `CL` clob, `BB` blob, `R` raw, `D` date, `T` timestamp, `TZ` timestamp with time zone, `RID` rowid …; Oracle only), the type in a toned-down shade of its values' color. Values are colored by the column's type (numbers green, text yellow, dates lavender, binary teal, booleans orange), numbers right-aligned, NULL dimmed, every other row shaded. Cells are cut at 40 columns with `…`, line breaks show as `↵`. |
+| Pages | The tab line above the shell: **pages**, each a stack of cells of its own (`1 main │ 2 page2 │ +`). **Ctrl-T** adds a page after the one shown, **Alt+← / Alt+→** (any mode) or **gT / gt** (vim NORMAL; `3gt` page 3) go to the previous / next, a click on a tab shows it, `+` adds one. The Ctrl-P palette also has **Close page**, **Rename page**, **Clear page** (every cell of the page goes, one empty cell stays, focused in INSERT mode; large results' open cursors close; not while one runs) and **Focus page N: name** for each page there is (type `focus page 2`, or the page's name). Each page keeps its cells, its focus and its last result (the result pane shows the page's own); a statement still running when you move on finishes on its page, whose tab shows `…` meanwhile. Closing a page drops its cells (the statements it ran stay in History); the last page stays. F1's snapshot keeps every page. |
+| Panel | One panel with the **History / Schema / Trace / Monitor / Archive / AI / Settings** tabs (`Alt-1` to `Alt-7`). The panel is 96 columns wide (at most half the screen) on most tabs; Trace and Monitor take half the screen, for their wide plans and tables. The first tab shown is `[ui] panel` (section 7). |
+| Result | Under a **heavy rule** (`━━`, in the theme's deep accent: the shell above and the result below are told apart at a glance) that shows **only the row count**, bold (`14 rows`, `500 rows, more ↓`; with the focus in the pane, `· row 3/14` after it; `(stale)` when the cell was edited since). The statement is in the shell, the connection in the top bar. Below it the latest result as a **boxed table**. Each header cell has the column name on the left and its type on the right (`N` number, `VCH` varchar2, `CH` char, `CL` clob, `BB` blob, `R` raw, `D` date, `T` timestamp, `TZ` timestamp with time zone, `RID` rowid …; Oracle only), the type in a toned-down shade of its values' color. Values are colored by the column's type (numbers green, text yellow, dates lavender, binary teal, booleans orange), numbers right-aligned, NULL dimmed, every other row shaded. Cells are cut at 40 columns with `…`, line breaks show as `↵`. |
 
 Connection state in the top bar:
 
@@ -110,7 +110,7 @@ Panel tabs:
 | History | This connection's queries, newest first, up to 500. Each row starts with its run number and when it ran (`HH:MM` today, `MM-DD` before). Numbers count up like an auto-increment: the first query ever run on the connection is 1, each run takes the next one, and they never change. A query run again moves to the top under its new number. Hints are colored as in the input area. |
 | Schema | A schema browser (section 6.2): the kinds of objects with their counts, a kind's objects, then one object's details (columns, indexes, constraints, triggers, arguments, compile errors) and its DDL. |
 | Monitor | Sessions, blocking, locked objects, top SQL and wait events, read when you press Ctrl-O in the tab (section 6.3). |
-| Bookmark | Saved queries (section 5.4), one to a line: id, `@alias` (a template), query, and the memo at the right end. Enter puts it in the prompt, `e` edits it right in the panel (vi keys, `:wq`); `a` adds, `A` (or `Ctrl-R` in a cell) bookmarks the current cell, `t` sets the alias, `d` deletes. |
+| Archive | Saved queries (section 5.4) on three pages, `[` / `]` between them: **Bookmark** (saved queries), **Template** (`@name args`, the query shown) and **Macro** (`(name args)` alone in a cell, the query run unseen). One to a line: id, call, query, and the memo at the right end. Enter puts it in the prompt, `i` the call, `e` edits it right in the panel (vi keys, `:wq`); `a` adds, `A` (or `Ctrl-R` in a cell) keeps the current cell, `t` names it, `M` moves it to another page, `d` deletes. |
 | AI | Questions about SQL to Claude, answered in the tab (section 6.4). |
 | Settings | Settings in one place (section 6.5); for now the color theme. |
 | Trace | With autotrace on (Oracle): the run's **estimated plan** (EXPLAIN PLAN + DBMS_XPLAN), **actual plan** (DISPLAY_CURSOR `ALLSTATS LAST`), **call statistics** (TKPROF's Parse / Execute / Fetch table, from a 10046 trace) and **session statistics**, drawn as a tree (section 6.1). It shows the trace of the cell focused in the shell. |
@@ -127,7 +127,9 @@ The layout follows the terminal's size. Panes, tabs, list items and the two swit
 | **`Ctrl-O`** | Runs the whole input area (no `;` needed), in INSERT and NORMAL mode. |
 | **`gg`** (NORMAL) | Jumps to the top cell, at the start of its first line. With a count (`3gg`) it goes to that line of this cell, as in vim. |
 | **`G`** (NORMAL) | Jumps to the bottom cell (the input cell), at the first non-blank of its last line, staying in NORMAL mode. With a count (`5G`), that line of this cell. `dG`, `ygg` and `G` in VISUAL keep their usual meaning (within the cell); `$` and `%` are vim's own (line end, matching bracket). |
+| **`Ctrl-D`** | Deletes the focused cell (any mode, also from its bind lines); the page's last cell stays, emptied. See "Both" below. |
 | **`Ctrl-N`** | A new empty cell below the cell under the cursor, focused in INSERT mode (with the completion menu open, Ctrl-N still moves in it). |
+| **`Ctrl-J`** / **`Ctrl-K`** (vim mode, NORMAL or INSERT) | The next / previous cell at once, wherever the cursor is in this one (at the target's start); a cell's bind lines are passed by (from them, Ctrl-K is their cell's SQL). In emacs mode Ctrl-J runs, as Ctrl-O, and Ctrl-K kills to the line's end. |
 | `Alt+Enter`, `F5` | The same. |
 | `Ctrl+Enter` | The same, where the terminal sends Ctrl+Enter distinctly from Enter (below). |
 
@@ -155,7 +157,7 @@ After a run it returns to INSERT mode, ready for the next query.
 |---|---|
 | INSERT | typing, `Enter` new line, `Tab` input helpers (section 5), `Esc` → NORMAL |
 | NORMAL | `h j k l` `w b e` `0 $` `gg G` move · `i a I A o O` insert · `x dd dw D` delete · `cw cc C` change · `yy p P` yank and put · `u` undo · `U` redo (Ctrl-R bookmarks the cell, below) · `v V` select · counts (`3dd`) |
-| Both | `↑` / `↓` on the first / last line: the previous / next cell (section 6, "Cells"; `k` / `j` in NORMAL) · `Ctrl-C` cancels a running statement (on its cell; on an empty input, or in the panel or the result pane, everything running: Oracle answers ORA-01013 and the connection stays usable), else clears the input cell, or drops the edits of an earlier cell · `Ctrl-L` clears the shell's cells · `Ctrl-D` on an empty input quits |
+| Both | `↑` / `↓` on the first / last line: the previous / next cell (section 6, "Cells"; `k` / `j` in NORMAL) · `Ctrl-C` cancels a running statement (on its cell; on an empty input, or in the panel or the result pane, everything running: Oracle answers ORA-01013 and the connection stays usable), else clears the input cell, or drops the edits of an earlier cell · `Ctrl-L` clears the shell's cells · **`Ctrl-D` deletes the focused cell** (in NORMAL or INSERT mode, also from its bind lines), whatever it holds: the focus goes to the next one (the one above for the bottom cell); the page's last cell stays, emptied; a running cell is not deleted (Ctrl-C stops it); its statement stays in History · `Ctrl-Q` quits |
 
 - **`Ctrl-U` formats the cell under the cursor** (sqlparse): one select item to a line, `FROM` / `JOIN` / `WHERE` / `AND` / `GROUP BY` on lines of their own, subqueries indented, spaces around operators. Keywords and names keep the case you typed; comments and hints stay. `u` (NORMAL mode) undoes it. PL/SQL blocks and `@template` calls are left alone. (It replaces vi's "delete to the line's start"; in the panel and the result pane Ctrl-U still scrolls.)
 - `P` (Shift+P) in NORMAL mode copies the focused cell right below it, on the same connection, and moves there (the cursor where it was). vim's "put before the cursor" is replaced; `p` still puts after it.
@@ -171,7 +173,8 @@ After a run it returns to INSERT mode, ready for the next query.
 | `Alt-8` | The prompt (the input cell), from any pane, in INSERT mode |
 | `Alt-9` | The side panel, on the tab it shows (shown again if Ctrl-B hid it) |
 | `Alt-0` | The result pane |
-| `Alt-1` … `Alt-7` | Opens the panel on History / Schema / Trace / Monitor / Bookmark / AI / Settings |
+| `Alt-1` … `Alt-7` | Opens the panel on History / Schema / Trace / Monitor / Archive / AI / Settings |
+| `Alt-M` (Option-M on a Mac) | Opens the panel on the Archive tab's **Macro** page, the focus on it, from anywhere (`µ`, what Option-M types when Option is not Meta, does it in NORMAL mode) |
 | `Ctrl-W h` / `j` / `k` / `l` | The pane to the left / below / above / right |
 | `Ctrl-W` + arrow, `Ctrl-W Ctrl-H/J/K/L` | The same |
 | `Ctrl-W w`, `Ctrl-W Ctrl-W` | The next pane |
@@ -186,7 +189,7 @@ Directions follow where the panes are drawn: from the prompt `Ctrl-W l` is the p
 |---|---|
 | `j` / `k`, `↓` / `↑` | Next / previous row (the row gets a blue-gray background, the selected cell white bold on blue; the title shows `row 3/20`) |
 | `h` / `l`, `←` / `→` | Previous / next column (a wide table scrolls sideways) |
-| `Ctrl+PageDown` / `Ctrl+PageUp` | Scroll the result pane a screen at a time, **wherever the focus is** (plain `PageUp` / `PageDown` scroll the panel) |
+| `Ctrl+PageDown` / `Ctrl+PageUp` | Scroll the result pane a screen at a time, **wherever the focus is** (plain `PageUp` / `PageDown` scroll the pane with the focus) |
 | `Ctrl-D` / `Ctrl-U`, mouse wheel | Scrolls half a screen / a line while the result pane has focus; the view and the selected row move together |
 | `g` `Home` / `G` `End` | First / last row |
 | `0` / `$` | First / last column |
@@ -202,10 +205,10 @@ Editing works on the result of a query on one plain table (no join, subquery, un
 | Key | Does |
 |---|---|
 | `→` / `←`, `l` / `h`, `Tab` / `Shift-Tab` | Next / previous tab (wrapping around) |
-| `1` … `7` | History / Schema / Trace / Monitor / Bookmark / AI / Settings |
+| `1` … `7` | History / Schema / Trace / Monitor / Archive / AI / Settings |
 | `j` / `k`, `↓` / `↑` | Moves the selection |
 | `g` / `G`, `Home` / `End` | Top / bottom |
-| `PageUp` / `PageDown` (or `Ctrl+F11` / `Ctrl+F12`) | Scroll the panel a screen at a time, **wherever the focus is** (the prompt, the result pane, the panel). `Ctrl+F11` / `Ctrl+F12` act as `PageUp` / `PageDown` everywhere, for keyboards that lack those keys |
+| `PageUp` / `PageDown` (or `Ctrl+F11` / `Ctrl+F12`) | Scroll **only the pane with the focus** a screen at a time. In the shell (a cell or its bind lines) the **view** moves and the cursor stays on its cell, so the result pane and the Trace tab keep showing that cell; the next key brings the view back to the cursor. In the panel, the panel; in the result pane, the result. `Ctrl+F11` / `Ctrl+F12` act as `PageUp` / `PageDown`, for keyboards that lack those keys |
 | `Ctrl-U` / `Ctrl-D`, mouse wheel | Scroll half a screen / a line while the panel has focus; a scrollbar shows on the right |
 | `Enter`, click | Uses the selected item (below) |
 
@@ -229,7 +232,10 @@ A command does exactly what its key does, where that key works: a cell command (
 | `F8`, or click `autotrace` in the top bar | Autotrace on / off (Oracle). While on, every run opens the Trace tab. |
 | `Ctrl-B` | Hides / shows the panel |
 | `Ctrl-Q` | Quits |
+| `Alt+S` / `Option+S` (NORMAL) | **Splits the cell into one cell per statement** (cut at each `;`, as Ctrl+Shift+O reads them): the first stays this cell, the others go right below it in order, on the same connection; the focus stays on the first, at its start. A PL/SQL block stays whole with its `/`, a comment above a statement goes with it, a trailing comment with the last one. A cell of one statement says so. A page holds 200 cells: a split never pushes other cells out; when the statements are more than the page has room for, the last cell keeps the rest together (Ctrl+Shift+O runs them all), and a full page says so. On a Mac whose Option key is not Meta, Option+S types `ß`, which does the same in NORMAL mode. In INSERT mode it does nothing |
+| `O` (Shift+O) in VISUAL mode (after `V`, `v` or Ctrl-V) | Runs **what the selection covers**, not the cursor's line: one statement runs alone, as `F4` runs it (that part lit); several run one after another, as Ctrl+Shift+O runs a cell, stopping at the first error with the cursor on it. The selection then ends (NORMAL mode) |
 | `O` (Shift+O, NORMAL) | Runs only **the line the cursor is on**, in place, like `F4` (the cell's result becomes that line's, no cell is added). With `select 1 from dual;` / `union all` / `select 2 from dual;` on three lines and the cursor on the first, only the first `select` runs. An empty line says so. vim's "open a line above" is replaced (`k` then `o` does the same) |
+| `Ctrl+Shift+O` | Runs **every statement of the cell in order** (a script), stopping at the first error with the cursor on the statement that failed (section 6) |
 | `F4` | Runs only the complete statement under the cursor, in place: the cell's result becomes that statement's, and no cell is added. In a cell of several statements it takes the one the cursor is in, ended by `;` (a PL/SQL block counts whole); a cell of one statement needs no `;`. It runs on the cell's connection: cells on different connections run at the same time, cells on one connection one after another. Any statement: queries, DML, DDL, PL/SQL |
 | `Ctrl-0` `Ctrl-1` `Ctrl-2`, `Ctrl-W` `0`…`3` | Puts the cell on connection conn0 … conn3 (section 6, "Connections"). Terminals send Ctrl-3 as Esc, so conn3 is `Ctrl-W 3` (works for all four) |
 | `F1` | Saves a snapshot of the session and quits: every shell cell with its result, the prompt's text and cursor, each result's fetched rows (all pages so far, column widths and sort), the focus and the result pane's place. The next `./dbcli` brings it back once; a large result's unfetched rest needs a re-run, as its cursor does not survive |
@@ -247,7 +253,8 @@ A command does exactly what its key does, where that key works: a cell command (
 2. `$name` before the cursor and a known abbreviation: replaced by its text.
 3. Nothing typed yet where a table goes (right after `FROM`, `JOIN`, `INTO`, `UPDATE`, or after a comma in a FROM list): **Tab puts a table name in, and each further Tab the next one** (your schema's own tables and views from the catalog `Ctrl-O` collected in the schema tab, and other tables you have used, best first: how often and how lately you used them, and how often they followed that word); after the last one the slot is empty again. This also follows a completed keyword: `select * fr` + Tab gives `from `, and the next Tab goes on to the tables (not to other words starting with `fr`). Likewise **after `ON`** (and after `=` or `AND` in a join condition) Tab puts in `alias.column` of the joined tables: after `ON` the columns the joined table shares with the earlier ones first (the likely join keys), after `a.x = ` the other tables' `x` first (from the collected catalog). And **after `WHERE` or `HAVING`** (and after `AND`, `OR`, `NOT` or `(` in it) Tab puts in the columns of the statement's tables, the ones you use most first: bare `column` for one table without an alias, else `alias.column`. Also **in a SELECT list** (right after `SELECT`, `DISTINCT` or a hint, or after a comma in the list): the columns of the tables its FROM names, even when the FROM comes after the cursor (`select ▏ from t a join t0 b …` + Tab → `a.v`, then `b.v`); with no FROM written yet there is none, and Tab opens the menu. And **after `ORDER BY` or `GROUP BY`** (and after a comma in its list) the same: the statement's tables' columns. And **after an UPDATE's `SET`** (and after a comma in its list) the updated table's columns, bare (in a MERGE's `update set`, the INTO table's). And **in an INSERT's column list** (right after `insert into t (`, or after a comma in it) the table's columns not listed yet, bare (in a MERGE's `insert (`, the INTO table's).
 4. A word being typed: replaced by the best candidate, with one space after (none if a space already follows). **Each further Tab puts the next candidate in its place** (up to 15, in ranking order; the top bar shows `Tab 2/6: to_date`), and after the last one the word as you typed it comes back. Typing `(` `,` `)` `.` or `;` right after takes that space back: `to_char(`.
-5. Nothing typed yet (anywhere else): opens the completion menu. In the menu Tab goes to the next item and Enter picks.
+5. Nothing typed yet (anywhere else): opens the completion menu when it has something to offer. In the menu Tab goes to the next item and Enter picks.
+6. **Nothing to complete** (a line's start, after a blank, a menu that would be empty): Tab **types a tab character** (`\t`), as in an editor. It shows as blanks up to the next stop (every 4 columns), not as `^I`; the text keeps the tab itself.
 
 ### 5.2 Abbreviations
 
@@ -271,8 +278,7 @@ A `$` inside a word, as in `v$session`, is not an abbreviation.
 After two letters the rest of a word shows in gray after the cursor.
 
 ```
-se▏lect        ← "lect" in gray. Tab → "select "
-SEL▏ECT        ← typed in capitals, suggested in capitals
+se▏LECT        ← "LECT" in gray. Tab → "SELECT " (the typed part too)
 from my▏Table  ← Tab → "from MyTable " (the stored spelling, the typed part included)
 ```
 
@@ -284,18 +290,19 @@ from my▏Table  ← Tab → "from MyTable " (the stored spelling, the typed par
 - **Words offered** besides your own: SQL keywords and the common Oracle functions (`nvl`, `decode`, `to_char`, `to_date`, `trunc`, `substr`, `listagg`, `row_number`, `regexp_like` …).
 - **Ties:** shorter words first, then alphabetical.
 - **Finished words:** a word already typed in full that scores higher gets no suggestion: `select` does not offer `selectivity`.
-- **Case:** names in all capitals or all lower case follow your typing; mixed case (`MyTable`) keeps its spelling.
+- **Case:** what Tab puts (the gray suggestion, the menu, a table after `FROM`, a hint) is in **upper case**, the letters already typed included, whatever your typing: `sel` → `SELECT`, `emp` → `EMP`, `/*+ gath` → `GATHER_PLAN_STATISTICS`. A name in mixed case (`MyTable`) keeps its spelling. The Settings tab's **Completion case** → `typed` (`[ui] completion_case = "typed"`) makes it follow your typing instead (`sel` → `select`, `SEL` → `SELECT`).
+- **Names in any script:** Korean table, view and column names (`주문`, `고객번호`, `주문_2024`) are learned, completed, colored and checked (the red underline) like English ones, and `alias.` offers a Korean table's columns too. One Hangul syllable is enough for a suggestion (`from 주` → `주문`), where Latin letters take two. Korean has no case, so completion puts such a name as it is stored, whatever the completion case.
 - **Not learned:** string literals (`'...'`), quoted identifiers, comments.
 - **No suggestion** with the cursor inside a word.
 - **No context yet:** after `from`, a keyword that scores higher can still come before a table name.
 
 #### Oracle hints
 
-On an Oracle connection the optimizer hints (`gather_plan_statistics`, `use_hash`, `leading`, `index_ffs`, `parallel`, `no_merge` and more) join the suggestions, following your case like keywords: `/*+ gath` → `gather_plan_statistics`, `/*+ GATH` → `GATHER_PLAN_STATISTICS`. In the input area, the History tab and the result title, SQL is drawn in a soft white, keywords (`select`, `from`, `where` …) in bold sky blue, table and view names in bold peach, operators and punctuation (`,` `(` `)` `+` `-` `*` `/` `|` `=` `<>` … and the `/*` `*/` around comments) in a pale pink bold, and hints inside `/*+ ... */` in bold pure white, so they stand out, and what their parentheses name (table aliases, index names, `@query_block`s) in a warm sand color: `/*+ index(e emp_ix) */`. The list is `src/dbcli/oracle_hints.py`.
+On an Oracle connection the optimizer hints (`gather_plan_statistics`, `use_hash`, `leading`, `index_ffs`, `parallel`, `no_merge` and more) join the suggestions, cased like keywords (upper case, or your typing with `completion_case = "typed"`): `/*+ gath` → `GATHER_PLAN_STATISTICS`. In the input area, the History tab and the result title, SQL is drawn in a soft white, keywords (`select`, `from`, `where` …) in bold sky blue, table and view names in bold peach, operators and punctuation (`,` `(` `)` `+` `-` `*` `/` `|` `=` `<>` … and the `/*` `*/` around comments) in a pale pink bold, and hints inside `/*+ ... */` in bold pure white, so they stand out, and what their parentheses name (table aliases, index names, `@query_block`s) in a warm sand color: `/*+ index(e emp_ix) */`. The list is `src/dbcli/oracle_hints.py`.
 
 ### 5.3.2 Missing tables, views and columns
 
-A table or view name after `FROM` (and its comma list), `JOIN`, `INTO` or `UPDATE` that the database does not have is drawn **red and underlined** while you type, and so is a **column** none of the statement's tables has. The names are read when the connection opens (Oracle: every table, view and synonym in `ALL_OBJECTS`, so `DUAL` and `V$` views count; PostgreSQL: `pg_class`; SQLite: `sqlite_master`) and again after a `create` / `drop` / `alter` / `rename`.
+A **column** none of the statement's tables has is drawn **red and underlined** while you type. A table or view name is always drawn ivory and bold, as table names are, also one the catalog does not have. The names are read when the connection opens (Oracle: every table, view and synonym in `ALL_OBJECTS`, so `DUAL` and `V$` views count; PostgreSQL: `pg_class`; SQLite: `sqlite_master`) and again after a `create` / `drop` / `alter` / `rename`.
 
 - Columns: `alias.col` is checked against that alias's table; a bare `col` against all the statement's tables together. A table's columns are read the first time a statement uses it (Oracle: the user's own table or view, or what a synonym of that name points to; PostgreSQL: `information_schema.columns`; SQLite: `pragma table_info`), so the underline can follow a moment later.
 - Bare column names are only judged when every table of the statement could be: a subquery, table function, `WITH` name, qualified name or link in a `FROM` leaves them alone. Keywords, functions, select-list aliases (`as total`, `nvl(v, 0) total`), pseudo-columns (`rownum`, `level`, `sysdate` …) and bind variables (`:id`) are never columns. DDL, PL/SQL and `PIVOT` / `MODEL` / `JSON_TABLE` statements are not checked.
@@ -303,9 +310,24 @@ A table or view name after `FROM` (and its comma list), `JOIN`, `INTO` or `UPDAT
 - Not judged, so never underlined: schema-qualified names (`hr.emp`), database links (`emp@remote`), quoted names, table functions (`table(...)`), names a `WITH` clause defines, and `FROM` inside a function call (`extract(year from d)`).
 - Before the connection is up nothing is underlined.
 
-### 5.4 Bookmarks and SQL templates
+### 5.4 Archive: bookmarks, templates and macros
 
-The **Bookmark** tab (`Alt-5`, below) keeps the queries you use often, each with an optional memo. Giving a bookmark an `@alias` is optional too: one that has an alias is also a **template**, called as `@alias args…`; one without is only a saved query to put in the prompt. Bookmarks are kept in `.dbclidata/bookmarks.json`. On the first start a `templates.json` from before fills it (each template a bookmark with its alias), or else the config's `[templates]` (section 7); after that the file is what counts.
+The **Archive** tab (`Alt-5`) keeps the queries you use often, on three pages: **Bookmark**, **Template** and **Macro** (the bar on top shows them; **`[` / `]`** or a click goes to the previous / next one). Each entry has an optional memo.
+
+- A **bookmark** is a saved query, to put in the prompt.
+- A **template** has an `@name` and is called as `@name args…`: the query it stands for shows (above the result, or put in the text by Tab).
+- A **macro** has a name and is called as **`(name args…)`, alone in a cell**: the query it stands for runs, but the cell keeps showing the call, its result and History too (`(sales 2024 10)`), the query itself never shows. With autotrace on, the Trace tab has its plans as usual.
+
+In a template's or a macro's query the arguments go in two ways:
+
+| In the query | Is | `(by_dept 10 'CLERK')` with `… deptno = :1 and job = $2` |
+|---|---|---|
+| `$1`, `$2` … | the argument's **text, put in the query as written** (a literal: quotes as passed) | `job = 'CLERK'` |
+| `:1`, `:2` … | a **bind variable**, which Oracle binds to the argument (its quotes taken off) | `:1` bound to `10` |
+
+Other binds of the query (`:cust_id`) are the cell's, as for any SQL (section 6). The number of arguments must equal the highest `$n` or `:n`; otherwise nothing runs and the error shows the query. Arguments are split on blanks; a quoted one is one argument (`'kim lee'`, SQL's `'it''s'` too). Only `$` followed by digits is an argument, so `v$session` and `$a` abbreviations do not clash. Templates and macros have names of their own each (`@same` and `(same)` can both exist). **A name is matched regardless of case**: `(*TBL)` calls `(*tbl)`, `@RANGE` is `@range` (one name, whatever its case: a second `*TBL` is refused). A macro's name may start with `*` (`*cnt`, handy for your own short ones: `(*` + Tab lists them) and take Korean letters (`(주문조회 2024)`); a template's `@name` takes letters, digits, `_` and `-`. `(select 1 from dual)` stays SQL: only a name that is a macro is a call.
+
+Everything is kept in `.dbclidata/bookmarks.json`, each entry with its kind: **one Archive for every connection** (not kept per connection), shared by every dbcli terminal, each taking in what another changed. Entries from before the Archive keep theirs: one with an `@alias` is a template, the others bookmarks. On the first start a `templates.json` from before fills it, or else the config's `[templates]` (section 7), as templates; after that the file is what counts.
 
 ```toml
 [templates]
@@ -319,38 +341,44 @@ who = "select * from emp where name = $1"
 
 ```
 > @a 4
--- select * from t where num <= 4        ← the expanded query stays in the shell
+-- select * from t where num <= 4        ← a template's query stays in the shell
 (4 rows)                                 ← the table is in the result pane
+
+> (sales 2024 10)                        ← a macro: only the call shows
+(12 rows)
 ```
 
 | Input | Does |
 |---|---|
 | `@a 4` + Ctrl-O | Puts `4` in `$1` and runs. No `;` needed (one is fine). |
-| `@range 1 10` | `$1` → `1`, `$2` → `10`. Arguments are split on spaces. |
+| `@range 1 10` | `$1` → `1`, `$2` → `10`. |
 | `@who 'kim lee'` | A quoted argument is one argument, quotes included → `name = 'kim lee'` |
 | `@a 4` + Tab | Expands the query into the input area without running it. |
 | `@ra` + Tab | Completes the name → `@range `. With several matches a menu shows names and bodies. |
 | `select * from (@a 4` + Tab | Inside a line too: the call from its `@` to the cursor becomes the query, in place → `select * from (select * from t where num <= 4`. The `@` must follow a space, `(`, `,` or `=` (so `emp@dblink` is left alone); a call with the wrong number of arguments inside a line gets the usual Tab. |
-| `@` + Ctrl-O | Lists the templates (the bookmarks with an alias) in the shell. |
+| `@` + Ctrl-O | Lists the templates in the shell. |
+| `(sales 2024 10)` + Ctrl-O | Runs the macro `sales` (the cell holds the call alone). |
+| `(` or `(*` + Tab | **Completes the macro's name**: the macros whose name starts so, **each Tab the next one** (round), a space after it and the call's `)` put after the cursor (`(*cnt |)`); the top bar shows its query. The completion menu lists them too, with their queries. |
+| `(*cnt 주문)` | A macro kept in the Archive: `select count(*) from $1`, the row count of the table named. |
 
-- Arguments are **substituted as text** (not driver bind variables). For strings write `'$1'` in the template, or pass `'value'`.
-- The number of arguments must equal the highest `$n` in the template; otherwise nothing runs and the error shows the template.
-- Only `$` followed by digits is an argument, so `v$session` and `$a` abbreviations do not clash.
 - While typing, the top bar shows `@a (args 1/1): select …`.
-- History keeps the call as typed (`@a 4`).
+- History keeps the call as typed (`@a 4`, `(sales 2024 10)`).
 
-**Bookmark tab** (`Alt-5`): one line per bookmark: `id @alias query` from the left (the alias column only when some bookmark has one, the query on one line, cut to fit) and the memo at the right end. The id is given when a bookmark is added and never reused.
+**Archive tab** (`Alt-5`): the pages' bar, the page's keys, then one line per entry: `id call query` from the left (`@name` on the Template page, `(name)` on the Macro page; the query on one line, cut to fit) and the memo at the right end. The id is given when an entry is added and never reused.
 
 | Key | Does |
 |---|---|
+| `[` / `]` | The previous / next page (Bookmark, Template, Macro); a click on the bar too |
+| `Alt-M` (anywhere) | Straight to the Macro page |
 | `Enter` | Puts the query in the prompt (the cell edited last): the whole text of an empty cell, else on a line of its own at the cursor; focus moves there in INSERT mode |
-| `i` | For a template, puts `@alias ` at the cursor instead: type its arguments, then Tab. For a plain bookmark, as Enter |
-| `e` | Edits the query in the panel, in place of the list, with the input area's vi keys and SQL colors (NORMAL mode to start; `i`, `A` … to type). The header shows `memo @alias #id`, and `[+]` while there are unsaved changes |
-| `a` | Adds one: asks for the memo, then the `@alias` (both optional: Enter on an empty answer leaves it out; no alias, no template), under the panel (Enter answers, Esc drops it, Ctrl-U clears), then opens the editor on an empty query in INSERT mode. It is added on the first `:w`; an empty query adds nothing |
-| `A`, or `Ctrl-R` in a cell (any mode) | Bookmarks the cell's SQL (for `A`, the cell edited last): asks for the memo and the `@alias`, both optional, and saves it. From a cell, the focus goes back to it |
-| `t` | Sets the `@alias`, making the bookmark a template; an empty answer clears it (a plain bookmark again) |
+| `i` | Puts the call instead: `@name ` at the cursor for a template (its arguments next, then Tab or Ctrl-O); `(name )` for a macro, alone in a cell (the cell edited last when empty, else a new one below), the cursor where the arguments go. For a bookmark, as Enter |
+| `e` | Edits the query in the panel, in place of the list, with the input area's vi keys and SQL colors (NORMAL mode to start; `i`, `A` … to type). The header shows the kind, `memo call #id`, and `[+]` while there are unsaved changes |
+| `a` | Adds one to the page shown: asks for the memo (optional; Enter on an empty answer leaves it out) and, on the Template and Macro pages, the name (needed), under the panel (Enter answers, Esc drops it, Ctrl-U clears), then opens the editor on an empty query in INSERT mode. It is added on the first `:w`; an empty query adds nothing |
+| `A`, or `Ctrl-R` in a cell (any mode) | Keeps the cell's SQL (for `A`, the cell edited last) on the page shown: asks for the memo (and the name for a template or a macro) and saves it. From a cell, the focus goes back to it |
+| `t` | Changes a template's `@name` or a macro's name |
+| `M` | Moves the entry to another page: asks `b`, `t` or `m` (bookmark, template, macro); a template or a macro keeps its name when it is free there, else asks for one |
 | `r` | Changes the memo (an empty answer clears it) |
-| `d` `d` | Deletes the bookmark (the first `d` asks, the second deletes) |
+| `d` `d` | Deletes the entry (the first `d` asks, the second deletes) |
 | `y` | Copies the query |
 
 In the editor (NORMAL mode):
@@ -360,7 +388,7 @@ In the editor (NORMAL mode):
 | `:w` (or `Ctrl-S` in any mode) | Saves |
 | `:wq`, `:x`, `ZZ` | Saves and goes back to the list |
 | `:q` | Back to the list; refused while there are unsaved changes |
-| `:q!`, `ZQ` | Back to the list, dropping the changes (a new bookmark is not added) |
+| `:q!`, `ZQ` | Back to the list, dropping the changes (a new entry is not added) |
 
 The `:` line opens under the panel: Enter runs it, Esc drops it. Other tabs can be opened meanwhile; `Alt-5` comes back to the editor as it was.
 
@@ -369,9 +397,20 @@ The file is shared by every dbcli terminal: a change made in one shows in the ot
 ## 6. Running queries
 
 - **Ctrl-O** (or Alt+Enter, F5, Ctrl+Enter) sends the **whole** input area as one statement. No `;` needed at the end.
-- A cell runs in place: its result shows under it and the cursor stays. **Ctrl-N** adds an empty cell right below the one under the cursor (at the bottom it becomes the new input cell), for the next statement. The statement also goes to the History tab, unless the database rejected it as a syntax or parse error (Oracle ORA-009xx such as ORA-00900, 00904, 00933, 00942, and PL/SQL compile errors; PostgreSQL SQLSTATE class 42; SQLite syntax and "no such" errors). Such a statement is not learned by the suggestions either. Other errors (a constraint, a lost connection) are kept.
-- Send one statement at a time: several joined with `;` make the database report an error.
-- **Bind variables** (`:cust_dt`, `:1`; Oracle and SQLite): running a statement that has them asks each one's value on a line under the shell (the cells), `:cust_dt =`, one after another. The value typed last for that name on this connection is filled in, so Enter alone uses it again; **Esc** drops the run. A value binds as a **string** (Oracle converts it where the column needs a number; for a date write `to_date(:cust_dt, 'YYYYMMDD')`), and `NULL` binds NULL. What was bound shows above the result (`-- :cust_dt = '20240101'`). A `:` inside a string (`'HH24:MI'`), a quoted name or a comment is not a bind, nor are a trigger's `:new` / `:old`. With autotrace on, the plans and call statistics are of the statement as run with these values.
+- **Ctrl-O goes on to the next cell:** once the cell ran without an error, the focus moves to the cell below it (if there is one, and the focus was still on the cell that ran), so Ctrl-O again runs that one, like a notebook. The result pane keeps showing the run just made until that next cell runs or the focus moves again. On an error the focus stays, to fix it; on the bottom cell it stays too. Ctrl+Enter, Alt+Enter, F5 (and Ctrl-J in emacs mode) do the same as Ctrl-O; F4, `O` and Ctrl+Shift+O do not move on.
+- A cell runs in place: its result shows under it (the focus moves on as above, or stays on the bottom cell). **Ctrl-N** adds an empty cell right below the one under the cursor (at the bottom it becomes the new input cell), for the next statement. The statement also goes to the History tab, unless the database rejected it as a syntax or parse error (Oracle ORA-009xx such as ORA-00900, 00904, 00933, 00942, and PL/SQL compile errors; PostgreSQL SQLSTATE class 42; SQLite syntax and "no such" errors). Such a statement is not learned by the suggestions either. Other errors (a constraint, a lost connection) are kept.
+- **The shell scrolls only when it must:** with PageUp / PageDown or **the mouse wheel** over it (3 lines a turn; the cursor and what shows below stay), or when the cursor goes past its top or bottom edge (then by as little as that takes), or when there is nothing left to show below (after a delete at the end). Moving onto another cell, editing or deleting in view does not move it.
+- **A long cell** (more than 30 lines, a pasted script) shows 30 lines and scrolls inside itself, keeping the cursor in view, with a scrollbar on its right; the shell stays quick however much is pasted (a 2000-line paste is in and drawn in a fraction of a second). Alt+S splits it into one cell per statement.
+- Ctrl-O sends one statement: several joined with `;` make the database report an error. For a **script** (several statements in one cell, each ended by `;`), **Ctrl+Shift+O** runs them **one after another**, top to bottom, in place. A PL/SQL block counts whole (its inner `;`s too), a comment above a statement goes with it, SQL*Plus' lone `/` after a block only ends it, and a trailing comment is no statement. Each statement lights up while it runs and goes to History. The cell then lists them, one line each: `✓  2. insert into 고객 values (1, 'a');  OK, 1 row(s) affected`. **The first error stops the script there:** that line is `✗` with the error, the statements after it are `·  not run`, the full error follows the list, and the cell takes the focus with the cursor at the start of the statement that failed (NORMAL mode in vim), so you can fix it and press F4 on it, or Ctrl+Shift+O again. The result pane shows the last statement's result. Ctrl-C stops the statement running and so the script. Ctrl+Shift+O needs a terminal that tells it from Ctrl-O (`scripts/keytest.py` shows it as `\x1b[27;6;79~` or `\x1b[79;6u`); the Ctrl-P palette has it too (Run all statements in order).
+- **Bind variables** (`:cust_dt`, `:1`; Oracle and SQLite): once a cell has **run** with them, it shows **one line per variable right under its SQL** (`:name = value`), with the value bound, above its outcome (`running…`, the row count); before its first run they do not show:
+
+  ```
+  #c0 conn0› select * from 주문 where 고객번호 = :cust_id and 주문일시 >= to_date(:dt, 'YYYYMMDD')
+    :cust_id = 1001
+    :dt = 20240101
+  ```
+
+  While a value is typed there (the cursor on the lines, or a run waiting for one) the names are **pink and bold**; once the run is done or another cell has the focus, the lines are toned down to gray. They follow the SQL as you edit it (a variable added after the run gets its line, empty). **A value given once is used by every later run of that cell**, without asking. **Each cell keeps its own values**: editing one changes no other cell. A cell that gets a variable for the first time (a new cell, or one you type it into) starts with the value another cell set for it last on this connection, if one did; a copy (Shift+P) or a split (Alt+S) has the values of the cell it came from; to change it, go onto its line and edit it: **`j`** from the SQL's last line goes onto the first bind line, `k` from the first bind line back to the SQL, `j` from the last one on to the next cell (and `k` from the next cell lands on them); the usual vim keys edit there (`cw`, `A`, `x` …), and Ctrl-N opens a new cell below, as in the cell. **The bind lines are part of their cell:** with the focus on them (`k` up from the next cell lands there), the cell is the focused one, its SQL and its lines on the focused background, and the result pane and the Trace tab show that cell's run. **Enter** (or Ctrl-O) on the bind lines runs the cell with them. A run that has a variable **with no value yet** asks only for that one: the lines open under the cell (also on a first run), the cursor on its line (INSERT mode); with several such, **Enter goes on to the next one** still empty, and from the last one it runs; **Ctrl-C** drops the run (a line left empty binds `''`, which Oracle takes as NULL). **The values are kept across restarts**: the last run's cell comes back with the values it ran with (`last.json`), F1's snapshot keeps every cell's, and the values cells set last on this connection (`sessions/<name>/binds.json`) are what a new cell starts with, after a restart too. A value binds as a **string** (Oracle converts it where the column needs a number; for a date write `to_date(:cust_dt, 'YYYYMMDD')`), and `NULL` binds NULL. A `:` inside a string (`'HH24:MI'`), a quoted name or a comment is not a bind, nor are a trigger's `:new` / `:old`. With autotrace on, the plans and call statistics are of the statement as run with these values.
 - **Oracle PL/SQL blocks** run as they are. A last line of `/`, as in SQL*Plus scripts, is dropped.
 
   ```sql
@@ -502,7 +541,7 @@ Each record in the shell is an editable **cell** (like a notebook). The bottom c
  (1 row)
  
  > ▏                                         ← input cell
-── Result · prod-ora · select * from t where v > 100 (2 rows) (stale) ──
+━━ 2 rows (stale) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
 - **↑ on the first line** of the input cell moves to the cell above; keep going up, or **↓ on the last line** to go down. Inside a multi-line cell ↑/↓ move between its lines. In NORMAL mode `k` / `j` do the same. Clicking a cell works too.
@@ -545,7 +584,7 @@ Each record in the shell is an editable **cell** (like a notebook). The bottom c
 
 ### 6.5 Settings tab
 
-`Alt-7` opens it: settings kept in one tab, saved to `[ui]` in `config.toml` (the rest of the file is left as it is). It holds the **theme**, the **editing mode** and **closing a page** (`delete`, the default: a page closes at once with its cells; `confirm`: asks `close page2 (3 cells)? y/n` first when it holds any). `j` / `k` move, Enter applies the line under the cursor at once (● marks what is in use) and saves it as `[ui] theme` / `[ui] editing_mode` / `[ui] close_page`, so the next start has it too. Each line shows the theme's colors: accent, second accent, numbers, text, dates, tables.
+`Alt-7` opens it: settings kept in one tab, saved to `[ui]` in `config.toml` (the rest of the file is left as it is). It holds the **theme**, the **editing mode**, the **completion case** (`upper`, the default: Tab completes `sel` to `SELECT`; `typed`: as you type) the **history size** (the History tab keeps the latest 100 / 500 (the default) / 1000 / 5000 statements, each once; `[ui] history_max` takes any number from 10 to 100000; the history file keeps every run) and **closing a page** (`delete`, the default: a page closes at once with its cells; `confirm`: asks `close page2 (3 cells)? y/n` first when it holds any). `j` / `k` move, Enter applies the line under the cursor at once (● marks what is in use) and saves it as `[ui] theme` / `[ui] editing_mode` / `[ui] close_page`, so the next start has it too. Each line shows the theme's colors: accent, second accent, numbers, text, dates, tables.
 
 | Theme | Colors |
 |---|---|
@@ -565,11 +604,13 @@ Example: `config.example.toml` in the repository.
 
 ```toml
 [ui]
-panel = "history"               # first panel tab: history | schema | trace | monitor | bookmark | ai | settings
+panel = "history"               # first panel tab: history | schema | trace | monitor | archive | ai | settings
 show_panel = true               # false: start with the panel hidden (Ctrl-B shows it)
 editing_mode = "vi"             # input area keys: vi (default) | emacs
 theme = "sky"                   # colors: sky (default) | forest | ember | dusk (the Settings tab sets it)
 close_page = "delete"           # closing a shell page: delete (default, at once) | confirm (ask first)
+history_max = 500               # the History tab's statements at most: 10 .. 100000 (Settings: 100 / 500 / 1000 / 5000)
+completion_case = "upper"       # Tab completes in: upper (default: sel -> SELECT) | typed (follows your typing)
 
 [ai]                            # the AI tab (6.4); all optional
 model = "claude-opus-5-5"
@@ -632,8 +673,9 @@ password = "tiger"
 | `.dbclidata/sessions/<connection>/schema.json` | The Schema tab where it was left (kinds, a kind's objects, an object's details and DDL) and the catalog Ctrl-O collected, so both are back after a restart |
 | `.dbclidata/sessions/<connection>/monitor.json` | The Monitor tab's last snapshot (and when it was taken), shown again after a restart until Ctrl-O takes a new one |
 | `.dbclidata/sessions/<connection>/ai.json` | The AI tab's latest 10 questions and answers (with the context each one sent), brought back by the next start |
-| `.dbclidata/sessions/<connection>/last.json` | That connection's last run: its text, outcome, result rows (up to 1000) and trace |
-| `.dbclidata/bookmarks.json` | The bookmarks (id, query, optional memo and alias), edited in the Bookmark tab; those with an alias are the templates. Made from an older `templates.json` or `[templates]` on first start |
+| `.dbclidata/sessions/<connection>/last.json` | That connection's last run: its text, outcome, result rows (up to 1000), trace and bind values |
+| `.dbclidata/sessions/<connection>/binds.json` | The bind values cells set last on that connection, by name: what a new cell starts with |
+| `.dbclidata/bookmarks.json` | The Archive tab's entries (id, kind: bookmark / template / macro, query, optional memo, name); entries from before kinds: one with an alias is a template. Made from an older `templates.json` or `[templates]` on first start |
 | `.dbclidata/words.db` | Word use counts for the gray suggestions, shared by all connections; saved on every run |
 
 Delete `words.db` to reset the ranking, or a connection's folder to forget its history and last run.
@@ -652,7 +694,7 @@ The source is in `src/dbcli/`; `./dbcli` at the repository root runs it with the
 | `src/dbcli/abbrev.py` | Finding and replacing `$abbreviations` |
 | `src/dbcli/words.py` | The weighted word model, gray suggestions, saving what was learned |
 | `src/dbcli/themes.py` | The color themes and the style made from one |
-| `src/dbcli/templates.py` | Bookmarks and the `@alias args` SQL templates |
+| `src/dbcli/templates.py` | The Archive's entries: bookmarks, `@name args` templates, `(name args)` macros, `$n` / `:n` arguments |
 | `src/dbcli/ai.py` | The AI tab: what is sent, the streamed answer, the SQL `i` inserts |
 | `src/dbcli/subscription.py` | `./dbcli subscription list / add / set / delete / show / unset`: the AI tab's keys |
 | `src/dbcli/connections.py` | `./dbcli connection list / add / delete / set` |

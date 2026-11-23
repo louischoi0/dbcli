@@ -81,8 +81,19 @@ def style_dict(c: dict) -> dict[str, str]:
         "symbol": f"{c['symbol']} bold",  # , ( ) + - * / | = < > …
         "hint.arg": c["hint_arg"],  # what a hint names in its parentheses: aliases, indexes, @query blocks
         "comment": f"{dim} italic nobold",  # `-- …` to the end of the line
+        # a cell's bind lines (`0 :cust_id = 20240101`): the name pink and bold while a value is
+        # typed there, the whole line toned down to gray otherwise
+        "bind.name": "#f5a3d0 bold",  # pink in every theme
+        # the result pane's title line: a heavy rule in the deep accent, so the shell above and the
+        # result below are told apart at a glance; the row count on it, bold
+        "result.rule": f"{deep} bold",
+        "result.count": f"{light} bold",
+        "result.count.focused": f"{accent} bold",
+        "result.note": dim,
+        "bind.idle": f"{mix(text, 0.5, dim)} nobold",  # halfway from dim gray up to the text's
         "missing": "#ff6b6b underline",  # a table, view or column the database does not have
-        "relation missing": "#ff6b6b bold underline",  # a missing table stays bold, as relation names are
+        # a table name stays ivory and bold even when the catalog does not have it (no red underline)
+        "relation missing": f"{c['relation']} bold nounderline",
         "prompt": f"{accent} bold",
         "prompt.dim": faint,
         "prompt.num": dim,  # `#c0`: the cell's number from the top

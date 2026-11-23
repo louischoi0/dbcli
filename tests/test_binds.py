@@ -2,7 +2,7 @@ import unittest
 
 from dbcli.db import SqliteDB
 from dbcli.statements import bind_names
-from dbcli.ui import bind_shown
+
 
 
 class BindNamesTest(unittest.TestCase):
@@ -36,10 +36,6 @@ class BindValuesTest(unittest.TestCase):
         db = SqliteDB(":memory:")
         res = db.execute("select :Cust_Dt, :CUST_DT, :n", {"cust_dt": "20240101", "n": None})
         self.assertEqual(res.rows, [("20240101", "20240101", None)])
-
-    def test_shown_as_sql(self):
-        self.assertEqual(bind_shown(None), "NULL")
-        self.assertEqual(bind_shown("it's"), "'it''s'")
 
 
 if __name__ == "__main__":

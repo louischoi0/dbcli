@@ -18,8 +18,15 @@ KNOWN = {
     "\x1b\r": "Alt+Enter           -> dbcli: run",
     "\x1b[15~": "F5                  -> dbcli: run",
     "\r": "Enter (or a Ctrl+Enter the terminal does not tell apart)",
-    "\n": "Ctrl-J              -> dbcli: run",
-    "\x0f": "Ctrl-O              -> dbcli: run",
+    "\n": "Ctrl-J              -> dbcli: next cell (vim mode), run (emacs mode)",
+    "\x0b": "Ctrl-K              -> dbcli: previous cell (vim mode)",
+    "\x0f": "Ctrl-O              -> dbcli: run (also what Ctrl+Shift+O sends when not told apart)",
+    "\x1b[27;6;79~": "Ctrl+Shift+O (xterm) -> dbcli: run every statement (script)",
+    "\x1b[27;6;111~": "Ctrl+Shift+O (xterm) -> dbcli: run every statement (script)",
+    "\x1b[27;5;79~": "Ctrl+Shift+O (tmux)  -> dbcli: run every statement (script)",
+    "\x1b[79;6u": "Ctrl+Shift+O (CSI u) -> dbcli: run every statement (script)",
+    "\x1b[111;6u": "Ctrl+Shift+O (CSI u) -> dbcli: run every statement (script)",
+    "\x1b[79;5u": "Ctrl+Shift+O (CSI u) -> dbcli: run every statement (script)",
 }
 
 

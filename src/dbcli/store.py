@@ -127,6 +127,20 @@ def load_last(folder: Path) -> dict | None:
     return data
 
 
+def save_binds(folder: Path, binds: dict[str, str]) -> None:
+    """The bind values a cell set last on this connection (by name): a new cell, also after a
+    restart, starts with them."""
+    _write_json(folder / "binds.json", {"binds": dict(binds)})
+
+
+def load_binds(folder: Path) -> dict[str, str]:
+    try:
+        data = json.loads((folder / "binds.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    return {str(k): str(v) for k, v in (data.get("binds") or {}).items()}
+
+
 def _encode_rows(rows) -> list:
     return [[_encode(v) for v in row] for row in rows or []]
 

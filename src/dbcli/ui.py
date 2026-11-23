@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import functools
 import math
 import datetime as dt
 import os
@@ -28,13 +29,13 @@ from typing import Callable
 from prompt_toolkit.application import Application, get_app
 from prompt_toolkit.output.color_depth import ColorDepth
 from prompt_toolkit.buffer import Buffer
-from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.completion import CompleteEvent, Completer, Completion
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.cursor_shapes import ModalCursorShapeConfig
 from prompt_toolkit.document import Document
 from prompt_toolkit.enums import EditingMode
 from prompt_toolkit.filters import (
-    Condition, emacs_insert_mode, has_focus, vi_insert_mode, vi_navigation_mode,
+    Condition, emacs_insert_mode, has_focus, vi_insert_mode, vi_navigation_mode, vi_selection_mode,
 )
 from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.key_binding.vi_state import InputMode
@@ -47,9 +48,10 @@ from prompt_toolkit.layout import (
     FormattedTextControl, HSplit, Layout, ScrollablePane, VSplit, Window,
 )
 from prompt_toolkit.layout.dimension import Dimension
-from prompt_toolkit.layout.margins import ScrollbarMargin
+from prompt_toolkit.layout.containers import ScrollOffsets
+from prompt_toolkit.layout.margins import ConditionalMargin, ScrollbarMargin
 from prompt_toolkit.layout.menus import CompletionsMenu
-from prompt_toolkit.layout.processors import Processor, Transformation
+from prompt_toolkit.layout.processors import Processor, TabsProcessor, Transformation
 from prompt_toolkit.layout.utils import explode_text_fragments
 from prompt_toolkit.mouse_events import MouseButton, MouseEventType
 from prompt_toolkit.styles import DynamicStyle
@@ -61,15 +63,15 @@ from .ai import (CELL_REF_RE, Assistant, Chat, Turn, cell_refs, error_message, l
 from .subscription import activate as subscription_activate, mask as mask_key, save_ui_setting
 from .connections import ConnectionError_
 from .config import CONFIG_PATH, DATA_DIR, PANEL_TABS, AISettings, Profile, UISettings, load as load_config
-from .store import (history_stamp, history_view, load_chat, load_history, load_last, load_monitor, load_schema,
-                    save_chat, save_last, save_monitor, save_schema,
+from .store import (history_stamp, history_view, load_binds, load_chat, load_history, load_last, load_monitor,
+                    load_schema, save_binds, save_chat, save_last, save_monitor, save_schema,
                     save_snapshot,
                     session_dir, take_snapshot)
 from .db import (MAX_ROWS, PAGE_ROWS, changes_schema, error_text, format_table, is_connection_error, is_parse_error,
                  open_db, prepare_statement)
 from . import monitor, schema
 from .formatter import NotFormatted, format_sql
-from .statements import bind_names, statement_at
+from .statements import Statement, bind_names, script_statements, split_pieces, statement_at
 from .themes import DEFAULT_THEME, SWATCH, THEMES, flash_colors, style as theme_style
 from .grid import BORDER, HEADER_LINES, Grid, build, copy_text, fit
 from .cell_edit import EditError, build_update, source_table
@@ -77,19 +79,20 @@ from .objects import NOISE_RE, blank_noise, column_refs, in_table_slot, scan, ta
 from .oracle_hints import HINT_WEIGHT, HINTS
 from .panes import neighbor
 from .tab import tab_action
-from .templates import NAME_PREFIX_RE, TemplateError, Templates
+from .templates import KINDS, NAME_PREFIX_RE, TemplateError, Templates
 from .trace_view import raw_width as trace_raw_width, render as render_trace
-from .words import KEYWORDS, PARTIAL_RE, WORD_CHAR_RE, WORD_RE, WordModel, match_case, previous_word
+from .words import KEYWORDS, PARTIAL_RE, WORD_CHAR_RE, WORD_RE, WordModel, previous_word
 
 PANEL_WIDTH = 32
 TRACE_WIDTH = 96  # the trace tab widens the panel (at most half the screen) so a plan fits
 MAX_CELLS = 200  # shell cells kept per session (oldest dropped)
-MAX_HISTORY_ITEMS = 500
 TAB_CANDIDATES = 15  # how many words Tab cycles through
 STATS_INTERVAL = 60  # seconds between recounts of the suggestion statistics
 # `!N` right before the cursor: Tab puts history entry N there
 HISTORY_REF_RE = re.compile(r"(?<![\w$#!])!(\d+)$")
 # a result title: the statement (cut at 60) and its row count, "(3 rows)"
+# a macro's name being typed at a cell's start: `(`, `(*`, `(*cn` (a macro is a cell's whole text)
+MACRO_TYPED_RE = re.compile(r"\s*\(\s*(\*?(?:[^\W\d][\w-]*)?)")
 RESULT_TITLE_RE = re.compile(r"(.*?)( \(\d+ rows?(?:, first \d+ shown|, more ↓)?\))", re.S)
 FETCH_AHEAD = 50  # rows from the end of what is fetched at which the next page is fetched
 MAX_OPEN_CURSORS = 5  # per session: large results whose cursors stay open for more rows
@@ -140,6 +143,20 @@ for _seq in ("\x1b[27;2;32~", "\x1b[32;2u"):
     ANSI_SEQUENCES[_seq] = SHIFT_SPACE
 # Alt+← / Alt+→: the shell's previous / next page. Keys of their own (not Esc then an arrow, which
 # would hold up a lone Esc in vim): the xterm modifier form and the meta-prefixed one.
+# Ctrl+Shift+O: every statement of the cell, in order. Only told from Ctrl-O with modified keys
+# asked for: xterm / tmux (Shift as a modifier, or folded into an upper case O) and CSI u forms.
+SCRIPT_KEY = Keys.ControlF5
+for _seq in ("\x1b[27;6;79~", "\x1b[27;6;111~", "\x1b[27;5;79~", "\x1b[79;6u", "\x1b[111;6u", "\x1b[79;5u"):
+    ANSI_SEQUENCES[_seq] = SCRIPT_KEY
+# Alt+S (Option+S): the cell split into one cell per statement (vim NORMAL). A key of its own:
+# not Esc then `s`. ESC s, and the modified-key forms.
+SPLIT_KEY = Keys.ControlF4
+for _seq in ("\x1bs", "\x1b[27;3;115~", "\x1b[115;3u"):
+    ANSI_SEQUENCES[_seq] = SPLIT_KEY
+# Alt+M (Option+M): the Archive tab's Macro page, from anywhere. A key of its own: not Esc then `m`.
+MACRO_PAGE_KEY = Keys.ControlF3
+for _seq in ("\x1bm", "\x1b[27;3;109~", "\x1b[109;3u"):
+    ANSI_SEQUENCES[_seq] = MACRO_PAGE_KEY
 PAGE_PREV, PAGE_NEXT = Keys.ControlF7, Keys.ControlF8
 for _seq in ("\x1b[1;3D", "\x1b[1;9D", "\x1b\x1b[D"):
     ANSI_SEQUENCES[_seq] = PAGE_PREV
@@ -176,11 +193,6 @@ def hint_slot(before: str) -> str | None:
 def hint_opening(before: str, after: str) -> bool:
     """True when the `/` just typed can open a hint comment (and nothing follows it)."""
     return bool(HINT_OPEN_RE.search(blank_noise(before))) and not after.startswith("*")
-
-
-def bind_shown(value: str | None) -> str:
-    """A bind value as the note above a run shows it: NULL, else an SQL string."""
-    return "NULL" if value is None else "'" + value.replace("'", "''") + "'"
 
 
 def run_stamp(finished: dt.datetime, seconds: float, cancelled: bool = False) -> str:
@@ -345,8 +357,66 @@ def hint_marks(text: str, lo: int = 0, hi: int | None = None) -> dict[int, str]:
     return marks
 
 
+@functools.lru_cache(maxsize=64)
+def text_marks(text: str) -> dict[int, str]:
+    """sql_marks of a whole text, kept: the input area asks for it line by line, every redraw,
+    and recomputing the whole text for each line made a long cell (a paste) freeze."""
+    return sql_marks(text)
+
+
+@functools.lru_cache(maxsize=64)
+def text_runs(text: str) -> tuple:
+    """text_marks as runs per line: for each line, ((start col, end col, style), …) where
+    consecutive characters share a style. Drawing a line then splits its fragments only where
+    a run starts or ends, not into one fragment per character."""
+    marks = text_marks(text)
+    out, at = [], 0
+    for line in text.split("\n"):
+        runs: list[list] = []
+        for j in range(len(line)):
+            st = marks.get(at + j)
+            if st is None:
+                continue
+            if runs and runs[-1][1] == j and runs[-1][2] == st:
+                runs[-1][1] = j + 1
+            else:
+                runs.append([j, j + 1, st])
+        out.append(tuple(tuple(r) for r in runs))
+        at += len(line) + 1
+    return tuple(out)
+
+
+def restyle(fragments, runs) -> list:
+    """The line's fragments with each run's style added over its columns, split only at the
+    runs' edges (a fragment keeps its mouse handler)."""
+    out, pos, k = [], 0, 0
+    for frag in fragments:
+        style, text, rest = frag[0], frag[1], frag[2:]
+        while text:
+            while k < len(runs) and runs[k][1] <= pos:
+                k += 1
+            if k == len(runs) or runs[k][0] >= pos + len(text):
+                out.append((style, text, *rest))  # no run in what is left of this fragment
+                pos += len(text)
+                break
+            a, b, st = runs[k]
+            if a > pos:  # plain up to the run
+                out.append((style, text[:a - pos], *rest))
+                text, pos = text[a - pos:], a
+            n = min(b - pos, len(text))
+            out.append((f"{style} {st}", text[:n], *rest))
+            text, pos = text[n:], pos + n
+    return out
+
+
 def highlighted(text: str, base: str = "class:input") -> list[tuple[str, str]]:
     """`text` as fragments, styled as in the input area (for the history list)."""
+    return list(_highlighted(text, base))
+
+
+@functools.lru_cache(maxsize=4096)
+def _highlighted(text: str, base: str) -> tuple:
+    # kept by text: the History tab draws every row it has on each redraw
     marks = sql_marks(text)
     out: list[tuple[str, str]] = []
     for i, ch in enumerate(text):
@@ -355,7 +425,7 @@ def highlighted(text: str, base: str = "class:input") -> list[tuple[str, str]]:
             out[-1] = (style, out[-1][1] + ch)
         else:
             out.append((style, ch))
-    return out
+    return tuple(out)
 
 
 # a run's text: lit, pulsing slowly (one soft dip a second) as long as it runs and at least
@@ -414,20 +484,100 @@ class RanHighlight(Processor):
         return Transformation(frags)
 
 
+class ShellPane(ScrollablePane):
+    """The shell's scrolling: PageUp / PageDown and the mouse wheel move the view itself, the
+    cursor (the focused cell, so the result pane and the Trace tab) staying where it is. Until
+    the next key the view stays where it was put; then it follows the cursor again, only as far
+    as needed to keep it in view."""
+
+    WHEEL = 3  # lines a turn of the wheel scrolls
+
+    def __init__(self, content, keys: Callable[[], int]):
+        self._keys = keys  # how many keys came in so far
+        self._free_at = -1  # the key that scrolled the view: it stays put until the next one
+        self.last_height = 10
+        super().__init__(content, display_arrows=False, keep_focused_window_visible=False,
+                         keep_cursor_visible=Condition(lambda: self._keys() != self._free_at),
+                         scroll_offsets=ScrollOffsets(top=0, bottom=0))
+
+    reveal_below = 0  # rows under the cursor to bring into view on the next redraw (a paste)
+
+    def _make_window_visible(self, visible_height, virtual_height, visible_win_write_pos, cursor_position):
+        # a paste (`p` and the like): its end in view first, as far as the cell goes, then the
+        # cursor, which wins when the text is taller than the shell
+        if self.reveal_below and cursor_position is not None:
+            bottom = visible_win_write_pos.ypos + visible_win_write_pos.height - 1
+            end = Point(cursor_position.x, min(cursor_position.y + self.reveal_below, bottom))
+            super()._make_window_visible(visible_height, virtual_height, visible_win_write_pos, end)
+        self.reveal_below = 0
+        super()._make_window_visible(visible_height, virtual_height, visible_win_write_pos, cursor_position)
+
+    def scroll_by(self, lines: int) -> None:
+        self._free_at = self._keys()
+        self.vertical_scroll = max(0, self.vertical_scroll + lines)  # its end: clipped when drawn
+        get_app().invalidate()
+
+    def page(self, direction: int) -> None:
+        self.scroll_by(direction * max(1, self.last_height - 1))
+
+    def write_to_screen(self, screen, mouse_handlers, write_position, parent_style, erase_bg, z_index):
+        self.last_height = write_position.height
+        super().write_to_screen(screen, mouse_handlers, write_position, parent_style, erase_bg, z_index)
+
+    def _copy_over_mouse_handlers(self, mouse_handlers, temp_mouse_handlers, write_position, virtual_width):
+        super()._copy_over_mouse_handlers(mouse_handlers, temp_mouse_handlers, write_position, virtual_width)
+        # the wheel anywhere over the shell (a cell, its outcome, the blank between) scrolls it
+        wrapped: dict = {}
+
+        def wrap(handler):
+            if handler not in wrapped:
+                def new(event):
+                    if event.event_type == MouseEventType.SCROLL_UP:
+                        self.scroll_by(-self.WHEEL)
+                        return None
+                    if event.event_type == MouseEventType.SCROLL_DOWN:
+                        self.scroll_by(self.WHEEL)
+                        return None
+                    return handler(event)
+                wrapped[handler] = new
+            return wrapped[handler]
+
+        rows = mouse_handlers.mouse_handlers
+        for y in range(write_position.ypos, write_position.ypos + write_position.height):
+            row = rows[y]
+            for x in range(write_position.xpos, write_position.xpos + write_position.width):
+                row[x] = wrap(row[x])
+
+
+class CellControl(BufferControl):
+    """A cell's BufferControl whose content is made once per redraw for a given size.
+    prompt_toolkit asks a cell for its content several times a redraw (its preferred height,
+    the heights' split, the drawing): made anew each time, every line went through the
+    processors again, many cells times over. Nothing a content depends on changes while one
+    redraw is being made."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self._made: tuple | None = None
+
+    def create_content(self, width, height, preview_search=False):
+        key = (get_app().render_counter, width, height, preview_search)
+        if self._made is not None and self._made[0] == key:
+            return self._made[1]
+        content = super().create_content(width, height, preview_search)
+        self._made = (key, content)
+        return content
+
+
 class SqlHighlight(Processor):
     """The input area's keywords and hint blocks (`/*+ ... */` may span lines), by sql_marks."""
 
     def apply_transformation(self, ti):
-        doc = ti.document
-        line_start = doc.translate_row_col_to_index(ti.lineno, 0)
-        marks = sql_marks(doc.text, line_start, line_start + len(doc.lines[ti.lineno]))
-        if not marks:
+        runs = text_runs(ti.document.text)  # the whole text's, worked out once (not per line)
+        line = runs[ti.lineno] if ti.lineno < len(runs) else ()
+        if not line:
             return Transformation(ti.fragments)
-        frags = explode_text_fragments(ti.fragments)
-        for i in range(len(frags)):
-            if line_start + i in marks:
-                frags[i] = (f"{frags[i][0]} {marks[line_start + i]}", frags[i][1], *frags[i][2:])
-        return Transformation(frags)
+        return Transformation(restyle(ti.fragments, line))
 
 
 class MissingObjects(Processor):
@@ -437,6 +587,7 @@ class MissingObjects(Processor):
                  columns: Callable[[list[str]], dict[str, frozenset | None] | None]):
         self.known = known
         self.columns = columns  # {table: its columns or None}, or None while they are loading
+        self._cache: tuple | None = None  # (redraw, text, cursor) -> the text's marked offsets
 
     def apply_transformation(self, ti):
         names = self.known()
@@ -446,12 +597,29 @@ class MissingObjects(Processor):
         line_start = doc.translate_row_col_to_index(ti.lineno, 0)
         line_end = line_start + len(doc.lines[ti.lineno])
         typing = get_app().layout.current_buffer is ti.buffer_control.buffer
-        marks = set()
+        # the whole text's marks, worked out once per redraw (not once per line, which made a
+        # long cell freeze): the names and columns known may change between redraws
+        key = (get_app().render_counter, doc.text, doc.cursor_position if typing else None)
+        if self._cache is None or self._cache[0] != key:
+            self._cache = (key, self._marks(doc, names, typing))
+        everything = self._cache[1]
+        marks = {i for i in range(line_start, line_end) if i in everything}
+        if not marks:
+            return Transformation(ti.fragments)
+        frags = explode_text_fragments(ti.fragments)
+        for i in range(len(frags)):
+            if line_start + i in marks:
+                frags[i] = (f"{frags[i][0]} class:missing", frags[i][1], *frags[i][2:])
+        return Transformation(frags)
+
+    def _marks(self, doc, names: set[str], typing: bool) -> set[int]:
+        """Every offset of the text under a missing table, view or column name."""
+        marks: set[int] = set()
+
         def mark(at: int, length: int) -> None:
-            end = at + length
-            if end < line_start or at > line_end or (typing and end == doc.cursor_position):
-                return  # another line, or still being typed
-            marks.update(range(max(at, line_start), min(end, line_end)))
+            if typing and at + length == doc.cursor_position:
+                return  # still being typed
+            marks.update(range(at, at + length))
 
         for at, name in table_refs(doc.text):
             if name.lower() not in names:
@@ -468,13 +636,7 @@ class MissingObjects(Processor):
                     have = cols.get(ref.table) if ref.table is not None else every
                     if have is not None and ref.name.lower() not in have:
                         mark(ref.at, len(ref.name))
-        if not marks:
-            return Transformation(ti.fragments)
-        frags = explode_text_fragments(ti.fragments)
-        for i in range(len(frags)):
-            if line_start + i in marks:
-                frags[i] = (f"{frags[i][0]} class:missing", frags[i][1], *frags[i][2:])
-        return Transformation(frags)
+        return marks
 
 
 class WordCompleter(Completer):
@@ -490,6 +652,13 @@ class WordCompleter(Completer):
             for name in self.templates.names(prefix):
                 yield Completion(name, start_position=-len(prefix),
                                  display_meta=self.templates.describe(name)[:60])
+            return
+        mac = MACRO_TYPED_RE.fullmatch(document.text_before_cursor)
+        if mac and self.templates.macro_names(mac.group(1)):  # `(` / `(*c`: the macros, their query as a hint
+            prefix = mac.group(1)
+            for name in self.templates.macro_names(prefix):
+                yield Completion(name, start_position=-len(prefix),
+                                 display_meta=" ".join(self.templates._macros[name].split())[:60])
             return
         m = PARTIAL_RE.search(document.text_before_cursor)
         if not m:
@@ -629,6 +798,7 @@ class TabbedPanel:
     def __init__(self, tabs: list[PanelTab], current: str, width: Callable[[], int] | None = None):
         self.tabs = tabs
         self._width = width
+        self._cache: tuple | None = None  # (redraw, tab, cursor, focus, width) -> its fragments
         self.index = [t.name for t in tabs].index(current)
         kb = KeyBindings()
         kb.add("up")(kb.add("k")(lambda e: self._move(-1)))
@@ -699,22 +869,54 @@ class TabbedPanel:
         return out
 
     def _fragments(self):
-        tab, entries = self.tab, self.tab.items()
+        # the same list while nothing it shows changed (asked for several times a redraw, and on
+        # every redraw): a tab that keeps its rows (History) is then not laid out anew each time
+        app = get_app()
+        entries = self.tab.items()
+        key = (id(entries), len(entries), self.index, self.tab.cursor,
+               app.layout.current_window is self.window, self.width(), self._drawn_rows(len(entries)))
+        if self._cache is not None and self._cache[0] == key and self._cache[2] is entries:
+            return self._cache[1]
+        out = self._make_fragments(entries)
+        self._cache = (key, out, entries)  # the rows kept too, so their id is not reused
+        return out
+
+    def _drawn_rows(self, n: int) -> tuple[int, int] | None:
+        """The rows drawn in full: those in view and a screen's worth above and below (and
+        around the cursor, which the view may move to). None: all of them (a short list)."""
+        info = self.window.render_info
+        if info is None or n <= 3 * max(1, info.window_height):
+            return None
+        h, top, cur = info.window_height, self.window.vertical_scroll, self.tab.cursor
+        lo, hi = top - h, top + 2 * h
+        if not lo <= cur < hi:  # the view follows the cursor: draw around it as well
+            lo, hi = min(lo, cur - h), max(hi, cur + h)
+        return max(0, lo), hi
+
+    def _make_fragments(self, entries):
+        tab = self.tab
         if not entries:
             return [("class:list.empty", " (none)")]
         tab.cursor = min(tab.cursor, len(entries) - 1)
         focused = get_app().layout.current_window is self.window
+        drawn = self._drawn_rows(len(entries))
         out = []
         for i, (label, style, note) in enumerate(entries):
+            if drawn is not None and not drawn[0] <= i < drawn[1]:
+                # far out of view: a line of its own all the same (the scrollbar and the
+                # cursor's place stay right), its colors only when it comes near
+                out += [("", " "), ("", "\n")]
+                continue
             cur = " class:list.cursor" if focused and i == tab.cursor else ""
             pick = clicked(lambda i=i: self._click(i))
             note = f" {note}" if note else ""
             # a label is plain text, or (style, text) fragments of its own (the trace tab)
-            frags = [(style, label)] if isinstance(label, str) else [(f"{style} {st}", t) for st, t in label]
-            used = sum(get_cwidth(t) for _, t in frags)
+            # (a fragment with a click handler of its own keeps it: the Archive tab's pages bar)
+            frags = [(style, label)] if isinstance(label, str) else [(f"{style} {f[0]}", *f[1:]) for f in label]
+            used = sum(get_cwidth(f[1]) for f in frags)
             pad = max(0, self.width() - 1 - used - get_cwidth(note) - 2)  # 1: scrollbar
             # the selection's background first, so a label's own colors (hints) still show on it
-            out += [(style + cur, " ", pick)] + [(f"{cur} {st}", t, pick) for st, t in frags]
+            out += [(style + cur, " ", pick)] + [(f"{cur} {f[0]}", f[1], f[2] if len(f) > 2 else pick) for f in frags]
             out += [(style + cur, " " * pad, pick), ("class:list.note" + cur, note + " ", pick), ("", "\n")]
         return out[:-1]
 
@@ -1012,8 +1214,9 @@ class ResultGrid:
 
     @staticmethod
     def _height() -> Dimension:
-        """About 40% of the screen, however many rows the result has (a long one scrolls)."""
-        rows = max(5, get_app().output.get_size().rows * 2 // 5)
+        """About 35% of the screen, however many rows the result has (a long one scrolls): the
+        shell and the panel above get the rest."""
+        rows = max(5, get_app().output.get_size().rows * 35 // 100)
         return Dimension(min=5, preferred=rows, max=rows)
 
     def _mouse(self, ev):
@@ -1157,23 +1360,56 @@ class Cell:
         parts = []
         if note is None:
             self.buffer = Buffer(multiline=True, completer=app.completer, complete_while_typing=False,
-                                 on_text_changed=lambda buf: app.drop_if_empty(self))
+                                 on_text_changed=lambda buf: app._cell_edited(self))
             self.window = Window(
-                BufferControl(buffer=self.buffer, input_processors=[SqlHighlight(),
+                CellControl(buffer=self.buffer, input_processors=[SqlHighlight(),
                                                                 MissingObjects(lambda: self.session.objects,
                                                                                lambda t: app.columns_for(self.session, t)),
                                                                 RanHighlight(self),
-                                                                GhostText(app.words)]),
+                                                                GhostText(app.words),
+                                                                # last: a tab drawn as blanks to the next
+                                                                # stop, not `^I` (the others count source columns)
+                                                                TabsProcessor(tabstop=4, char1=" ", char2=" ")]),
                 dont_extend_height=True, wrap_lines=True, get_line_prefix=self._prefix,
                 always_hide_cursor=Condition(lambda: self.cursor_hidden),
+                height=self._height,
+                right_margins=[ConditionalMargin(ScrollbarMargin(display_arrows=False),
+                                                 filter=Condition(self._tall))],
                 style=self._style)
             app.cell_of[self.window] = self
             parts.append(self.window)
+            # its bind variables' values, right under its text and above its outcome (`running…`):
+            # one line each, `0 :cust_id = 20240101`, reached and edited with the vim keys. They
+            # show once the cell ran with them (or while a run waits for a value on them).
+            self.bind_names: tuple[str, ...] = ()  # the variables of its text, in order
+            self.binds_ran = False  # it ran with bind values: its bind lines show
+            self.bind_values: dict[str, str] = {}  # its own values, by name (lower case)
+            self.bind_buffer = Buffer(multiline=True, on_text_changed=lambda b: app._bind_edited(self))
+            self.bind_window = Window(
+                BufferControl(buffer=self.bind_buffer, key_bindings=app.bind_kb),
+                dont_extend_height=True,
+                # the values too; on the cell's focused background with its SQL, as part of it
+                style=lambda: ("class:input" if app.binds_active(self) else "class:bind.idle")
+                + (" class:cell.focused" if self.focused() and not self.is_input else ""),
+                get_line_prefix=lambda n, w: app._bind_prefix(self, n))
+            app.bind_of[self.bind_window] = self
+            parts.append(ConditionalContainer(self.bind_window, filter=Condition(lambda: app.binds_shown(self))))
         parts.append(ConditionalContainer(
             Window(FormattedTextControl(self._output_fragments), dont_extend_height=True, wrap_lines=True),
             filter=Condition(lambda: bool(self._output_fragments()))))
         parts.append(ConditionalContainer(Window(height=1), filter=Condition(lambda: not self.is_input)))
         self.container = HSplit(parts)
+
+    # A cell taller than this shows this many lines and scrolls inside itself (the cursor kept
+    # in view, a scrollbar on the right): the shell draws every line of every cell on each
+    # redraw, so a long paste in one cell made every key slow.
+    TALL = 30
+
+    def _tall(self) -> bool:
+        return self.buffer is not None and self.buffer.document.line_count > self.TALL
+
+    def _height(self):
+        return Dimension.exact(self.TALL) if self._tall() else None  # None: as tall as its text
 
     @property
     def is_input(self) -> bool:
@@ -1189,7 +1425,9 @@ class Cell:
         return self.has_run and self.buffer is not None and self.buffer.text.strip() != self.ran_text.strip()
 
     def focused(self) -> bool:
-        return self.window is not None and get_app().layout.current_window is self.window
+        """The focus is in the cell: its SQL or its bind lines (they are part of it)."""
+        current = get_app().layout.current_window
+        return self.window is not None and (current is self.window or current is getattr(self, "bind_window", None))
 
     def _style(self) -> str:
         return "class:input class:cell.focused" if self.focused() and not self.is_input else "class:input"
@@ -1308,7 +1546,7 @@ class Session:
     objects_sorted: list[str] = field(default_factory=list)  # the same, sorted: offered after FROM
     columns: dict[str, frozenset | None] = field(default_factory=dict)  # table -> its columns, as loaded
     pagers: list = field(default_factory=list)  # cells whose large result keeps its cursor open
-    binds: dict[str, str] = field(default_factory=dict)  # bind name (lower case) -> the value last typed
+    binds: dict[str, str] = field(default_factory=dict)  # bind name -> the value a cell set last: a new one starts with it
     browser: "Browser" = field(default_factory=lambda: Browser())  # the schema tab's place
     watch: "Watch" = field(default_factory=lambda: Watch())  # the monitor tab's last snapshot
     chat: Chat = field(default_factory=Chat)  # the AI tab's conversation
@@ -1358,15 +1596,25 @@ class App:
         self.style = theme_style(self.theme)  # the app draws with whatever this is (Settings tab: a theme)
         self.flash_colors = flash_colors(self.theme)  # a run's lit text, and what it fades into
         self.words = WordModel(DATA_DIR / "words.db")
+        self.words.upper = ui.completion_case == "upper"  # Tab completes SELECT for `sel`
         self.completer = WordCompleter(self.words, self.templates)
         self.words.context = self._completion_context
         self.show_panel = ui.show_panel
         self.trace_raw = False  # `r` in the trace tab: DISPLAY_CURSOR as DBMS_XPLAN's table
+        self._history_cache: tuple | None = None  # (what the history is, its rows as drawn)
+        self._pane_hold: tuple | None = None  # (cell Ctrl-O went on to, the cell that ran): its result stays
         self.vi = ui.editing_mode == "vi"
         self.close_page_mode = ui.close_page  # delete | confirm
+        self.history_max = ui.history_max  # the History tab's statements at most (Settings)
         self.message, self.error = "", False
         self._tab_cycle: dict | None = None  # the word Tab is cycling through, see _cycle_tab
+        self._macro_cycle: dict | None = None  # the macro name Tab is cycling through, see _cycle_macro
         self.cell_of: dict[Window, Cell] = {}
+        # each cell's bind lines (made with the cell): their window -> the cell, their keys
+        self.bind_of: dict[Window, Cell] = {}
+        self._bind_wait: dict | None = None  # {"cell", "future"}: a run waits for a value there
+        self._keys_in = 0  # keys (and mouse events) come in so far: the shell's free scroll lasts one
+        self.bind_kb = self._bind_keys()
         self._shown_key: tuple | None = None
 
         self.sessions = {p.name: self._new_session(p) for p in profiles}
@@ -1385,11 +1633,13 @@ class App:
                               keys={"r": self._trace_toggle_raw}, width=self._trace_width),
             "monitor": PanelTab("monitor", "Monitor", self._monitor_items, lambda i: None,
                                 keys={"c-o": self._monitor_now}),
-            "bookmark": PanelTab("bookmark", "Bookmark", self._template_items, self._template_pick,
-                                 keys={"a": self._template_add, "A": self._template_add_cell,
-                                       "e": self._template_edit_current, "r": self._template_rename,
-                                       "t": self._template_alias, "d": self._template_delete,
-                                       "i": self._template_insert, "y": self._template_copy}),
+            "archive": PanelTab("archive", "Archive", self._template_items, self._template_pick,
+                                keys={"a": self._template_add, "A": self._template_add_cell,
+                                      "e": self._template_edit_current, "r": self._template_rename,
+                                      "t": self._template_alias, "d": self._template_delete,
+                                      "i": self._template_insert, "y": self._template_copy,
+                                      "M": self._template_move,
+                                      "[": lambda: self._archive_page(-1), "]": lambda: self._archive_page(1)}),
             "settings": PanelTab("settings", "Settings", self._settings_items, self._settings_pick),
             "ai": PanelTab("ai", "AI", self._ai_items, self._ai_pick,
                            keys={"a": self._ai_prompt, "i": self._ai_insert, "y": self._ai_copy,
@@ -1399,6 +1649,7 @@ class App:
         # the monitor's wide tables get half the screen
         self.panel = TabbedPanel([tabs[n] for n in PANEL_TABS], ui.panel, width=self._panel_width)
         self._tpl_delete: int | None = None  # the template `d` asked about (a second `d` deletes)
+        self.archive_kind = "bookmark"  # the Archive tab's page: bookmark | template | macro ([ / ])
         self._ask: dict | None = None  # the one-line question under the panel (a bookmark's name, its @alias)
         self._bind_lock = asyncio.Lock()  # one run at a time asks for its bind values (F4 runs several)
         self.ask_buffer = Buffer(multiline=False)
@@ -1413,14 +1664,14 @@ class App:
             height=1, style="class:input",
             get_line_prefix=lambda n, w: [("class:ai.prompt" if self._ask and self._ask["label"] == AI_PROMPT
                                            else "class:list.note", f" {self._ask['label']} " if self._ask else " ")])
-        # the same question under the shell, for what a run asks (its bind values): the same
-        # buffer and keys, only shown there
+        # the same question under the shell, for what concerns the shell (a page's name, closing
+        # it): the same buffer and keys, only shown there
         self.shell_ask_window = Window(
             BufferControl(buffer=self.ask_buffer, key_bindings=ask_kb), height=1, style="class:input",
             get_line_prefix=lambda n, w: [("class:prompt", f" {self._ask['label']} " if self._ask else " ")])
         asking = Condition(lambda: self._ask is not None and not self._ask["shell"])
         asking_shell = Condition(lambda: self._ask is not None and self._ask["shell"])
-        # the bookmark editor: the Bookmark tab's place while a query is edited (vi keys, `:w` …)
+        # the Archive editor: the Archive tab's place while a query is edited (vi keys, `:w` …)
         self._tpl_edit: dict | None = None  # {"id": id or None for a new one, "alias", "saved": body}
         self.editor_buffer = Buffer(multiline=True, completer=self.completer, complete_while_typing=False)
         ed_kb = KeyBindings()
@@ -1429,10 +1680,11 @@ class App:
         ed_kb.add("Z", "Q", filter=vi_navigation_mode)(lambda e: self._editor_command("q!"))
         ed_kb.add("c-s")(lambda e: self._editor_command("w"))
         self.editor_window = Window(
-            BufferControl(buffer=self.editor_buffer, key_bindings=ed_kb, input_processors=[SqlHighlight()]),
+            BufferControl(buffer=self.editor_buffer, key_bindings=ed_kb,
+                          input_processors=[SqlHighlight(), TabsProcessor(tabstop=4, char1=" ", char2=" ")]),
             wrap_lines=True, style="class:input",
             get_line_prefix=lambda n, w: [("class:list.note", f"{n + 1:>3} " if not w else "    ")])
-        editing = Condition(lambda: self._tpl_edit is not None and self.panel.tab.name == "bookmark")
+        editing = Condition(lambda: self._tpl_edit is not None and self.panel.tab.name == "archive")
         editor = HSplit([Window(FormattedTextControl(self._editor_header), height=1, char="─", style="class:border"),
                          self.editor_window], width=lambda: Dimension.exact(self.panel.width()))
         top = VSplit([
@@ -1448,14 +1700,15 @@ class App:
                 filter=Condition(lambda: self.show_panel)),
         ], height=Dimension(weight=3))
 
-        # -- results (bottom, full width, ~40% of the height) --
+        # -- results (bottom, full width, ~35% of the height) --
         self.results = ResultGrid()
         self.results.on_copy = self.copy_to_clipboard
         self.results.on_near_end = self.fetch_more
         self.results.on_edit = self.edit_value
         self.results.on_say = lambda message: self.say(message, error=True)
-        results_title = Window(FormattedTextControl(self._results_title), height=1, char="─",
-                               style="class:border")
+        # a heavy rule, apart from the thin ones elsewhere: the shell above, the result below
+        results_title = Window(FormattedTextControl(self._results_title), height=1, char="━",
+                               style="class:result.rule")
 
         # -- top bar: connection and online state --
         top_bar = HSplit([Window(FormattedTextControl(self._top_bar), height=1),
@@ -1493,9 +1746,12 @@ class App:
         return [
             C("Run", "Run cell", "Ctrl-O", ("c-o",), "cell"),
             C("Run", "Run statement under cursor", "F4", ("f4",), "cell"),
+            C("Run", "Run all statements in order (script)", "Ctrl+Shift+O", (SCRIPT_KEY,), "cell"),
             C("Run", "Run line under cursor", "O (NORMAL)", ("O",), "cell-normal"),
             C("Run", "Cancel running / clear input", "Ctrl-C", ("c-c",), "cell"),
             C("Cell", "New cell below", "Ctrl-N", ("c-n",), "cell"),
+            C("Cell", "Delete the cell", "Ctrl-D", ("c-d",), "cell"),
+            C("Cell", "Split cell into one cell per statement", "Alt-S (NORMAL)", (SPLIT_KEY,), "cell-normal"),
             C("Cell", "Format SQL", "Ctrl-U", ("c-u",), "cell"),
             C("Cell", "Clear cell text", "L (NORMAL)", ("L",), "cell-normal"),
             C("Cell", "Go to top cell", "gg (NORMAL)", ("g", "g"), "cell-normal"),
@@ -1506,6 +1762,9 @@ class App:
             C("Page", "Previous page", "Alt-← / gT", (PAGE_PREV,)),
             C("Page", "Close page", "", (), action=self.close_page),
             C("Page", "Rename page", "", (), action=self.rename_page),
+            C("Page", "Clear page (every cell goes, one empty cell stays)", "", (), action=self.clear_page),
+            *[C("Page", f"Focus page {i + 1}: {p.name}", f"{i + 1}gt", (), action=lambda i=i: self.show_page(i))
+              for i, p in enumerate(self._session.pages)],
             *conns,
             C("Focus", "Prompt (input cell)", "Alt-8", (PROMPT_KEY,)),
             C("Focus", "Side panel", "Alt-9", (PANEL_KEY,)),
@@ -1516,10 +1775,14 @@ class App:
             *tabs,
             C("Schema", "Collect catalog", "Ctrl-O (Schema tab)", ("c-o",), "tab:schema"),
             C("Monitor", "Take snapshot", "Ctrl-O (Monitor tab)", ("c-o",), "tab:monitor"),
-            C("Bookmark", "Add bookmark", "a (Bookmark tab)", ("a",), "tab:bookmark"),
-            C("Bookmark", "Bookmark the current cell's SQL", "Ctrl-R", ("c-r",), "cell"),
+            C("Archive", "Add to the Archive page shown", "a (Archive tab)", ("a",), "tab:archive"),
+            C("Archive", "Keep the current cell's SQL in the Archive", "Ctrl-R", ("c-r",), "cell"),
             C("Cell", "Duplicate the cell below", "P (NORMAL)", ("P",), "cell-normal"),
-            C("Bookmark", "Set a bookmark's @alias (template)", "t (Bookmark tab)", ("t",), "tab:bookmark"),
+            C("Archive", "Go to Macro page", "Alt-M", (MACRO_PAGE_KEY,)),
+            C("Archive", "Next Archive page (Bookmark, Template, Macro)", "] (Archive tab)", ("]",), "tab:archive"),
+            C("Archive", "Previous Archive page", "[ (Archive tab)", ("[",), "tab:archive"),
+            C("Archive", "Rename a template or macro", "t (Archive tab)", ("t",), "tab:archive"),
+            C("Archive", "Move an entry to another Archive page", "M (Archive tab)", ("M",), "tab:archive"),
             C("AI", "Ask AI a question", "a (AI tab)", ("a",), "tab:ai"),
             C("AI", "Insert SQL from the last answer", "i (AI tab)", ("i",), "tab:ai"),
             C("AI", "New AI chat", "c (AI tab)", ("c",), "tab:ai"),
@@ -1533,6 +1796,7 @@ class App:
         ]
 
     def open_palette(self) -> None:
+        self.palette.commands = self._commands()  # made anew: the pages there are now
         self._palette_back = self.app.layout.current_window
         self._palette_mode = self.app.vi_state.input_mode
         self.palette.buffer.reset()
@@ -1582,7 +1846,10 @@ class App:
         """A page with one empty cell, put at `at` (else last) and shown."""
         page = Page(name)
         page.stack = HSplit([])
-        page.container = ScrollablePane(page.stack, display_arrows=False)
+        # the shell scrolls only when it must: PageUp / PageDown, or the cursor going past its top or
+        # bottom edge (or nothing left to show below). Not to show a cell whole when the focus moves
+        # onto it, nor a line before the edge.
+        page.container = ShellPane(page.stack, lambda: self._keys_in)
         at = len(s.pages) if at is None else at
         s.pages.insert(at, page)
         s.page_index = at  # shown, so the cell is made on it
@@ -1595,12 +1862,13 @@ class App:
         s = Session(p)
         self._new_page(s, "main")
         s.folder = session_dir(p.name)
+        s.binds = load_binds(s.folder)  # the bind values cells set last: new cells start with them
         s.file_history = FileHistory(str(s.folder / "history"))
         s.runs = load_history(s.folder / "history")
         self._load_schema(s)
         self._load_monitor(s)
         s.chat = Chat.from_json(load_chat(s.folder))  # the AI tab's latest questions, from the last run
-        s.history = history_view(s.runs, MAX_HISTORY_ITEMS)
+        s.history = history_view(s.runs, self.history_max)
         snap = take_snapshot(s.folder)
         if snap is not None:
             try:
@@ -1642,7 +1910,8 @@ class App:
                 continue
             entry = {"text": c.buffer.text, "cursor": c.buffer.cursor_position, "ran_text": c.ran_text,
                      "output": [list(f) for f in c.output], "title": c.result_title, "trace": c.trace,
-                     "more": c.pager is not None, "input": c is page.input_cell, "conn": c.conn_index}
+                     "more": c.pager is not None, "input": c is page.input_cell, "conn": c.conn_index,
+                     "binds": dict(c.bind_values), "binds_ran": c.binds_ran}
             if c.grid is not None and c.grid.source is not None:
                 entry.update(self._grid_state(c.grid))
             cells.append(entry)
@@ -1697,6 +1966,8 @@ class App:
                 cell = Cell(self, s, note=tuple(entry["note"]))
             else:
                 cell = s.input_cell if entry.get("input") else Cell(self, s)
+                cell.bind_values = {str(k): str(v) for k, v in (entry.get("binds") or {}).items()}
+                cell.binds_ran = bool(entry.get("binds_ran"))
                 text = entry.get("text") or ""
                 cell.buffer.set_document(Document(text, min(entry.get("cursor", len(text)), len(text))))
                 cell.ran_text = entry.get("ran_text")
@@ -1776,6 +2047,8 @@ class App:
         if not last or not last.get("text"):
             return
         cell = Cell(self, s)
+        cell.bind_values = {str(k): str(v) for k, v in (last.get("binds") or {}).items()}  # as it last ran
+        cell.binds_ran = bool(last.get("binds_ran"))
         cell.buffer.set_document(Document(last["text"], len(last["text"])))
         cell.ran_text = last["text"]
         cell.conn_index = last.get("conn", 0) if 0 <= last.get("conn", 0) < CONNECTIONS else 0
@@ -1794,7 +2067,9 @@ class App:
         try:
             save_last(s.folder, {"conn": cell.conn_index, "text": cell.ran_text, "output": [list(f) for f in cell.output],
                                  "columns": columns, "rows": rows, "kinds": kinds, "types": types, "title": cell.result_title,
-                                 "trace": cell.trace})
+                                 "trace": cell.trace, "binds": dict(cell.bind_values), "binds_ran": cell.binds_ran})
+            if cell.bind_values:
+                save_binds(s.folder, s.binds)  # the values set last, for a new cell after a restart
         except OSError as e:
             self.say(f"could not save the last run: {e}", error=True)
 
@@ -1862,6 +2137,53 @@ class App:
         if self.vi:
             self.app.vi_state.input_mode = InputMode.INSERT
 
+    def split_cell(self, cell: Cell) -> None:
+        """NORMAL Alt+S: a cell of several statements becomes one cell per statement, in order,
+        on the same connection: the first stays this cell, the others go right below it. The
+        focus stays on the first, at its start."""
+        if cell is None or cell.buffer is None:
+            return
+        if cell.running:
+            self.say("the cell is still running", error=True)
+            return
+        pieces = split_pieces(cell.buffer.text)
+        if len(pieces) < 2:
+            self.say("Alt+S: one statement in the cell, nothing to split", error=True)
+            return
+        p = cell.page
+        # a page holds MAX_CELLS cells: the split never pushes out others (nor its own first
+        # pieces, which it once did, losing them and failing on the focus); what does not fit
+        # stays together in the last cell
+        room = MAX_CELLS - len(p.cells) + 1  # this cell is the first piece
+        if room < 2:
+            self.say(f"Alt+S: the page holds {MAX_CELLS} cells already (Ctrl-D deletes one, or a new page: Ctrl-T)",
+                     error=True)
+            return
+        whole = len(pieces)
+        if whole > room:
+            pieces = pieces[:room - 1] + ["\n".join(pieces[room - 1:])]
+        cell.buffer.set_document(Document(pieces[0], 0), bypass_readonly=True)
+        at = p.cells.index(cell)
+        made = []
+        for text in pieces[1:]:
+            new = Cell(self, cell.session)
+            new.page, new.conn_index = p, cell.conn_index
+            new.bind_values = dict(cell.bind_values)  # the bind values the cell had
+            new.buffer.set_document(Document(text, 0), bypass_readonly=True)
+            at += 1
+            p.cells.insert(at, new)
+            p.stack.children.insert(at, new.container)
+            made.append(new)
+        if cell is p.input_cell:  # the bottom cell was split: the last piece is the bottom now
+            p.input_cell = made[-1]
+        self._focus_cell(cell, at_end=False)
+        if whole > len(pieces):
+            self.say(f"split into {len(pieces)} cells: a page holds {MAX_CELLS}, so the last one keeps the other "
+                     f"{whole - len(pieces) + 1} statements together (Ctrl+Shift+O runs them all)")
+        else:
+            self.say(f"split into {len(pieces)} cells")
+        self.app.invalidate()
+
     def duplicate_cell(self, cell: Cell) -> None:
         """NORMAL Shift+P: a copy of the cell's text right below it, on the same connection,
         focused with the cursor where it was (vim's "put before the cursor" gives way)."""
@@ -1872,6 +2194,7 @@ class App:
         self.new_cell_below(cell)
         copy = self._focused_cell()
         copy.conn_index = cell.conn_index
+        copy.bind_values = dict(cell.bind_values)  # its bind values too
         copy.buffer.set_document(Document(text, at), bypass_readonly=True)
         if self.vi:
             self.app.vi_state.input_mode = InputMode.NAVIGATION
@@ -1951,6 +2274,30 @@ class App:
         self.show_page(s.page_index)
         self.say(f"page {page.name} closed")
 
+    def clear_page(self) -> None:
+        """Every cell of the page shown goes, one empty cell stays (the statements they ran
+        stay in History). Not while one of them runs."""
+        s = self._session
+        page = s.page
+        if any(c.running for c in page.cells):
+            self.say(f"page {page.name}: a statement is still running", error=True)
+            return
+        for c in page.cells:
+            self._drop_pager(c)  # a large result's open cursor closes
+            self.cell_of.pop(c.window, None)
+        s.pagers = [c for c in s.pagers if c.page is not page]
+        fresh = Cell(self, s)
+        page.cells = [fresh]
+        page.stack.children[:] = [fresh.container]
+        page.input_cell = page.edit_cell = fresh
+        page.last_run = page.shown = None
+        self._pane_hold = None
+        self._focus_cell(fresh, at_end=True)
+        if self.vi:
+            self.app.vi_state.input_mode = InputMode.INSERT
+        self.say(f"page {page.name} cleared: one empty cell")
+        self.app.invalidate()
+
     def rename_page(self) -> None:
         s = self._session
         page = s.page
@@ -1977,18 +2324,45 @@ class App:
     def remove_empty(self, cell: Cell) -> None:
         """Remove an empty cell (a delete key on it once it was emptied); the focus moves to the
         next cell, or for the bottom cell to the one above, which becomes the bottom one."""
-        s = cell.session
-        if cell.buffer.text or cell.running or cell not in s.cells:
+        if cell.buffer.text or cell.running or cell not in cell.session.cells:
             return
+        if self._drop_cell(cell):
+            self.say("empty cell removed")
+
+    def delete_cell(self, cell: Cell | None) -> None:
+        """Ctrl-D in a cell (or on its bind lines): the cell goes, whatever it holds; the focus
+        moves to the next one (the one above for the bottom cell). The page's last cell stays,
+        emptied. The statement it ran stays in History."""
+        if cell is None or cell.buffer is None:
+            return
+        if cell.running:
+            self.say("the cell is still running: Ctrl-C stops it first", error=True)
+            return
+        if len(self._editable(cell.session)) < 2:  # the last cell of the page stays, emptied
+            cell.buffer.reset()
+            self._clear_result(cell)
+            self._focus_cell(cell, at_end=False)
+            if self.vi:
+                self.app.vi_state.input_mode = InputMode.INSERT
+            self.say("the last cell stays: emptied")
+            return
+        if self._drop_cell(cell):
+            self.say("cell deleted (its statement stays in History)")
+
+    def _drop_cell(self, cell: Cell) -> bool:
+        """Take the cell off its page; the focus on the next one (the one above for the bottom
+        cell, which is the bottom one then). False when it is the last one left."""
+        s = cell.session
         cells = self._editable(s)
-        if len(cells) < 2:
-            return  # the last cell left stays
+        if len(cells) < 2 or cell not in cells:
+            return False
         k = cells.index(cell)
         after = cells[k + 1] if k + 1 < len(cells) else cells[k - 1]
         i = s.cells.index(cell)
         s.cells.pop(i)
         s.stack.children.pop(i)
         self.cell_of.pop(cell.window, None)
+        self.bind_of.pop(getattr(cell, "bind_window", None), None)
         self._drop_pager(cell)
         s.pagers = [c for c in s.pagers if c is not cell]
         if cell is s.input_cell:  # the bottom cell went: the one above is the bottom now
@@ -2000,9 +2374,11 @@ class App:
             s.shown = s.last_run
         if s.edit_cell is cell:
             s.edit_cell = after
+        if self._pane_hold is not None and cell in self._pane_hold:
+            self._pane_hold = None
         self._focus_cell(after, at_end=False)  # at the start: a held backspace stops there
-        self.say("empty cell removed")
         self.app.invalidate()
+        return True
 
     def _clear_result(self, cell: Cell) -> None:
         """An emptied cell that stays is a fresh one: no `(6 rows)`, no `(stale)`, no result."""
@@ -2025,6 +2401,15 @@ class App:
         """A message line in the shell (connection events and the like)."""
         self._insert_cell(s, Cell(self, s, note=(style, text)))
 
+    def _cell_in_focus(self) -> Cell | None:
+        """The cell the focus is in: on its SQL or on its bind lines, which belong to it (so the
+        result pane and the Trace tab show that cell's run)."""
+        cell = self._focused_cell()
+        if cell is None:
+            c = self.bind_of.get(get_app().layout.current_window)
+            cell = c if c is not None and c.session is self._session and c in self._session.cells else None
+        return cell
+
     def _focused_cell(self) -> Cell | None:
         cell = self.cell_of.get(get_app().layout.current_window)
         return cell if cell is not None and cell.session is self._session else None
@@ -2036,12 +2421,55 @@ class App:
         self.app.layout.focus(cell.window)
         cell.buffer.cursor_position = len(cell.buffer.text) if at_end else 0
 
-    def _step(self, cell: Cell, delta: int) -> None:
-        """Move focus to the previous/next editable cell (↑ on the first line, ↓ on the last)."""
+    def _jump_cell(self, delta: int) -> None:
+        """vim Ctrl-J (1) / Ctrl-K (-1): the next / previous cell, wherever the cursor is in this
+        one, at its start. From a cell's bind lines, Ctrl-K is that cell's SQL (the lines are
+        its), Ctrl-J the next cell."""
+        on_binds = self.app.layout.current_window in self.bind_of
+        cell = self._cell_in_focus()
+        if cell is None:
+            return
+        if on_binds and delta < 0:
+            self._focus_cell(cell, at_end=False)
+            return
         cells = self._editable(cell.session)
         i = cells.index(cell) + delta
         if 0 <= i < len(cells):
-            self._focus_cell(cells[i], at_end=delta < 0)
+            self._focus_cell(cells[i], at_end=False)
+
+    def page_focused(self, direction: int) -> None:
+        """PageUp (-1) / PageDown (1): only the pane with the focus scrolls a screen: the shell
+        (from a cell or its bind lines: its view, the focused cell staying), the result pane, else
+        the panel."""
+        current = self.app.layout.current_window
+        cell = self._focused_cell() or self.bind_of.get(current)
+        if cell is not None:
+            cell.page.container.page(direction)  # the view moves; the cursor, so what shows below, stays
+        elif current is self.results.window:
+            self.results.page(direction)
+        elif self.show_panel:
+            self.panel.page(direction)
+
+    def _step(self, cell: Cell, delta: int, from_binds: bool = False) -> None:
+        """Move focus to the previous/next editable cell (↑ on the first line, ↓ on the last),
+        through a cell's bind lines, which sit under its SQL: down from the SQL goes onto them,
+        up from the next cell lands on them."""
+        if cell is None:
+            return
+        if delta > 0 and self.binds_shown(cell) and not from_binds:
+            self.app.layout.focus(cell.bind_window)
+            cell.bind_buffer.cursor_position = 0
+            return
+        cells = self._editable(cell.session)
+        i = cells.index(cell) + delta
+        if 0 <= i < len(cells):
+            target = cells[i]
+            if delta < 0 and self.binds_shown(target):
+                self.app.layout.focus(target.bind_window)
+                doc = target.bind_buffer.document
+                target.bind_buffer.cursor_position = doc.translate_row_col_to_index(doc.line_count - 1, 0)
+                return
+            self._focus_cell(target, at_end=delta < 0)
 
     def _sync_results(self, _app=None) -> None:
         """Before each render: show the result of the focused cell in the bottom pane.
@@ -2050,10 +2478,15 @@ class App:
         pane itself, the pane keeps what it shows.
         """
         s = self._session
-        cell = self._focused_cell()
+        cell = self._cell_in_focus()
         if cell is not None:
             s.edit_cell = cell
-            s.shown = cell if cell.has_run else s.last_run
+            hold = self._pane_hold
+            if hold is not None and hold[0] is cell and hold[1] in s.cells:
+                s.shown = hold[1]  # Ctrl-O went on to this cell: the run just made stays shown
+            else:
+                self._pane_hold = None
+                s.shown = cell if cell.has_run else s.last_run
         want = s.shown
         key = (id(s), id(want), want.version if want else 0)
         if key == self._shown_key:
@@ -2071,29 +2504,75 @@ class App:
     # -- drawing --------------------------------------------------------
     def _history_items(self):
         s, now = self._session, dt.datetime.now()
+        h = s.history
+        # kept until the history or the day changes: drawn on every redraw, a long history made
+        # each key slow (the stamps only tell today from earlier days)
+        key = (id(h), len(h), h[0][0] if h else None, h[-1][0] if h else None, len(s.runs), now.date())
+        if self._history_cache is not None and self._history_cache[0] == key:
+            return self._history_cache[1]
         digits = len(str(len(s.runs)))  # run numbers, right-aligned: 1 is the oldest run
-        return [([("class:list.id", f"{n:>{digits}} "), ("class:list.note", f"{history_stamp(when, now)} ")]
-                 + highlighted(" ".join(text.split())), "", "")
-                for n, when, text in s.history]
+        items = [([("class:list.id", f"{n:>{digits}} "), ("class:list.note", f"{history_stamp(when, now)} ")]
+                  + highlighted(" ".join(text.split())), "", "")
+                 for n, when, text in h]
+        self._history_cache = (key, items)
+        return items
 
     # -- bookmark: saved queries with a name; one with an `@alias` is a template too ------------
+    # -- Archive: bookmarks, templates (`@name args`) and macros (`(name args)`), a page each ----
+    ARCHIVE_HEAD = 2  # rows above the first entry: the pages' bar, the keys
+    ARCHIVE_TITLES = {"bookmark": "Bookmark", "template": "Template", "macro": "Macro"}
+    ARCHIVE_KEYS = {
+        "bookmark": "Enter / i SQL into the prompt · a/A add · e edit · r memo · M move · d y",
+        "template": "Enter SQL · i @call · a/A add · e edit · r memo · t name · M move · d y · $1 text :1 bind",
+        "macro": "Enter SQL · i (call) · a/A add · e edit · r memo · t name · M move · d y · $1 text :1 bind",
+    }
+    ARCHIVE_EMPTY = {
+        "bookmark": "(none: a adds one, A bookmarks the current cell)",
+        "template": "(none: a adds one, A makes the current cell one; called as @name args)",
+        "macro": "(none: a adds one, A makes the current cell one; called alone in a cell as (name args))",
+    }
+
+    def go_to_archive(self, kind: str) -> None:
+        """The panel on the Archive tab's `kind` page (Alt+M: the macros), the focus on it."""
+        self.show_panel = True
+        self.panel.select(PANEL_TABS.index("archive"))
+        self._archive_page(0, kind)
+        self.app.layout.focus(self.panel.window)
+        if self.vi:
+            self.app.vi_state.input_mode = InputMode.NAVIGATION
+        self.say(f"Archive: {self.ARCHIVE_TITLES[kind]} page · Enter puts the query, i the call ((name ))")
+
+    def _archive_page(self, delta: int, kind: str | None = None) -> None:
+        """`[` / `]` (or a click on the bar): the previous / next page of the Archive tab."""
+        kinds = list(KINDS)
+        self.archive_kind = kind or kinds[(kinds.index(self.archive_kind) + delta) % len(kinds)]
+        self._tpl_delete = None
+        self.panel.tabs[PANEL_TABS.index("archive")].cursor = self.ARCHIVE_HEAD
+        self.app.invalidate()
+
     def _template_items(self):
-        entries = self.templates.entries()
-        head = [([("class:schema.title", "Bookmark"),
-                  ("class:list.note", "  Enter prompt · e edit · a/A add · r memo · t @alias · d y")],
-                 "", "")]
+        kind = self.archive_kind
+        entries = self.templates.entries(kind)
+        bar = []
+        for k in KINDS:
+            if bar:
+                bar.append(("class:border", "│"))
+            bar.append(("class:tab.active" if k == kind else "class:tab", f" {self.ARCHIVE_TITLES[k]} ",
+                        clicked(lambda k=k: self._archive_page(0, k))))
+        bar.append(("class:list.note", "   [ / ] page"))
+        head = [(bar, "", ""), ([("class:list.note", self.ARCHIVE_KEYS[kind])], "", "")]
         if not entries:
-            return head + [("(none: a adds one, A bookmarks the current cell)", "class:list.empty", "")]
+            return head + [(self.ARCHIVE_EMPTY[kind], "class:list.empty", "")]
         idw = len(str(max(t.id for t in entries)))
-        aw = max((len(t.alias) + 2 for t in entries if t.alias), default=0)
+        aw = max((len(t.call) + 1 for t in entries if t.call), default=0)
         room = self.panel.width() - 3  # the panel draws a space before and after each line, and the scrollbar
         out = head
         for t in entries:
-            # id, @alias and the query from the left; the memo at the right end
+            # id, the call (@name / (name)) and the query from the left; the memo at the right end
             name = fit(t.memo, max(8, room // 3)) if t.memo else ""
             frags = [("class:list.id", f"{t.id:>{idw}} ")]
             if aw:
-                frags.append(("class:prompt.num", f"{'@' + t.alias if t.alias else '':<{aw}}"))
+                frags.append(("class:prompt.num", f"{t.call:<{aw}}"))
             used = sum(get_cwidth(x) for _, x in frags)
             query = cut_fragments(highlighted(" ".join(t.body.split())), room - used - get_cwidth(name) - 2)
             used += sum(get_cwidth(x) for _, x in query)
@@ -2102,61 +2581,83 @@ class App:
         return out
 
     def _template_current(self):
-        """The bookmark on the panel's cursor line (the first line is the header)."""
-        i = self.panel.tab.cursor - 1
-        entries = self.templates.entries()
+        """The entry on the panel's cursor line (below the pages' bar and the keys)."""
+        i = self.panel.tab.cursor - self.ARCHIVE_HEAD
+        entries = self.templates.entries(self.archive_kind)
         return entries[i] if 0 <= i < len(entries) else None
 
+    def _template_select(self, t) -> None:
+        """The Archive tab on `t`'s page, its cursor on it."""
+        self.archive_kind = t.kind
+        ids = [x.id for x in self.templates.entries(t.kind)]
+        if t.id in ids:
+            self.panel.tabs[PANEL_TABS.index("archive")].cursor = self.ARCHIVE_HEAD + ids.index(t.id)
+
     def _template_pick(self, i: int) -> None:  # Enter (or a click) on a line: its SQL into the prompt
-        self._template_put(as_call=False)
+        if i >= self.ARCHIVE_HEAD:
+            self._template_put(as_call=False)
 
     def _template_edit_current(self) -> None:
         t = self._template_current()
         if t is None:
             return
         self._tpl_delete = None
-        self._open_editor(t.id, t.memo, t.alias, t.body)
+        self._open_editor(t.id, t.memo, t.alias, t.body, t.kind)
 
     def _template_ask_alias(self, done: Callable[[str | None], None], text: str = "",
-                            keep: int | None = None) -> None:
-        self._ask_for("@alias (optional, makes it a template):", text,
-                      lambda a: self.templates.check_alias(a.lstrip("@"), keep=keep),
-                      lambda a: done(a.lstrip("@") or None))
+                            keep: int | None = None, kind: str = "template") -> None:
+        """A template's @name or a macro's name (needed for both)."""
+        label = "@name (called as @name args):" if kind == "template" else "macro name (called as (name args)):"
+        strip = lambda a: a.strip().lstrip("@").strip("()").strip()
+        self._ask_for(label, text,
+                      lambda a: "a name is needed" if not strip(a)
+                      else self.templates.check_alias(strip(a), keep=keep, kind=kind),
+                      lambda a: done(strip(a)))
 
     def _template_ask_memo(self, done: Callable[[str], None], text: str = "") -> None:
         self._ask_for("memo (optional):", text, lambda m: None, done)
 
+    def _with_name(self, kind: str, done: Callable[[str | None], None]) -> None:
+        """A bookmark needs no name: on at once; a template or a macro asks for it."""
+        if kind == "bookmark":
+            done(None)
+        else:
+            self._template_ask_alias(done, kind=kind)
+
     def _template_add(self) -> None:
-        """`a`: an optional memo and @alias, then the query in the editor."""
+        """`a`: an optional memo (and a template's or macro's name), then the query in the editor."""
         self._tpl_delete = None
+        kind = self.archive_kind
 
         def got_memo(memo: str) -> None:
-            self._template_ask_alias(lambda alias: self._open_editor(None, memo, alias, ""))
+            self._with_name(kind, lambda alias: self._open_editor(None, memo, alias, "", kind))
         self._template_ask_memo(got_memo)
 
     def _template_add_cell(self, cell: Cell | None = None) -> None:
-        """`A` in the Bookmark tab, Ctrl-R in a cell: bookmark the cell's SQL (the cell last
-        edited for `A`), asking for an optional memo and @alias under the panel."""
+        """`A` in the Archive tab, Ctrl-R in a cell: the cell's SQL (the cell last edited for
+        `A`) kept on the Archive page shown, asking for an optional memo (and a name) under the
+        panel."""
         self._tpl_delete = None
         cell = cell or self._target_cell()
         body = cell.buffer.text.strip() or (cell.ran_text or "").strip()
         if not body:
-            self.say("the cell is empty: nothing to bookmark", error=True)
+            self.say("the cell is empty: nothing to keep", error=True)
             return
+        kind = self.archive_kind
 
         def got_memo(memo: str) -> None:
             def got_alias(alias: str | None) -> None:
                 try:
-                    t = self.templates.add(body, memo, alias)
+                    t = self.templates.add(body, memo, alias, kind=kind)
                 except TemplateError as e:
                     self.say(str(e), error=True)
                     return
-                self.panel.tabs[PANEL_TABS.index("bookmark")].cursor = \
-                    1 + [x.id for x in self.templates.entries()].index(t.id)
-                self.say(f"bookmarked as #{t.id}" + (f" @{t.alias}" if t.alias else "") + (f": {t.memo}" if t.memo else ""))
-            self._template_ask_alias(got_alias)
-        self.show_panel = True  # the questions open under the panel, on the Bookmark tab
-        self.panel.select(PANEL_TABS.index("bookmark"))
+                self._template_select(t)
+                self.say(f"kept as {self.ARCHIVE_TITLES[kind].lower()} #{t.id}" + (f" {t.call}" if t.call else "")
+                         + (f": {t.memo}" if t.memo else ""))
+            self._with_name(kind, got_alias)
+        self.show_panel = True  # the questions open under the panel, on the Archive tab
+        self.panel.select(PANEL_TABS.index("archive"))
         self._template_ask_memo(got_memo)
 
     def _template_rename(self) -> None:
@@ -2173,18 +2674,52 @@ class App:
         self._template_ask_memo(got, t.memo)
 
     def _template_alias(self) -> None:
-        """`t`: give the bookmark an @alias (it is then a template: `@alias args`), or clear it."""
+        """`t`: a template's @name or a macro's name, changed."""
         t = self._template_current()
         if t is None:
             return
         self._tpl_delete = None
+        if t.kind == "bookmark":
+            self.say("a bookmark has no name: M moves it to Template or Macro", error=True)
+            return
 
         def got(alias: str | None) -> None:
             if alias == t.alias:
                 return
             self.templates.update(t.id, alias=alias)
-            self.say(f"{t.label}: @{alias}, a template now" if alias else f"{t.label}: no alias, not a template")
-        self._template_ask_alias(got, t.alias or "", keep=t.id)
+            moved = next(x for x in self.templates.entries() if x.id == t.id)
+            self.say(f"#{t.id} is {moved.call} now")
+        self._template_ask_alias(got, t.alias or "", keep=t.id, kind=t.kind)
+
+    def _template_move(self) -> None:
+        """`M`: move the entry to another page (b, t, m); a template or a macro gets a name."""
+        t = self._template_current()
+        if t is None:
+            return
+        self._tpl_delete = None
+        letters = {"b": "bookmark", "t": "template", "m": "macro"}
+
+        def to(kind: str) -> None:
+            def done(alias: str | None) -> None:
+                try:
+                    self.templates.update(t.id, alias=alias, kind=kind)
+                except TemplateError as e:
+                    self.say(str(e), error=True)
+                    return
+                moved = next(x for x in self.templates.entries() if x.id == t.id)
+                self._template_select(moved)
+                self.say(f"#{t.id} moved to {self.ARCHIVE_TITLES[kind]}" + (f": {moved.call}" if moved.call else ""))
+            if kind == "bookmark":
+                done(None)
+            elif t.alias and not self.templates.check_alias(t.alias, keep=t.id, kind=kind):
+                done(t.alias)  # its name serves there too
+            else:
+                self._template_ask_alias(done, t.alias or "", keep=t.id, kind=kind)
+        others = "/".join(k for k, v in letters.items() if v != t.kind)
+        self._ask_for(f"move #{t.id} to ({others}: bookmark, template, macro):", "",
+                      lambda a: None if letters.get(a.strip().lower()[:1]) not in (None, t.kind)
+                      else f"{others}: the page to move it to",
+                      lambda a: to(letters[a.strip().lower()[:1]]))
 
     def _template_delete(self) -> None:
         t = self._template_current()
@@ -2199,8 +2734,9 @@ class App:
         self.say(f"{t.label} deleted")
 
     def _template_insert(self) -> None:
-        """`i`: `@alias ` at the prompt's cursor for a template (arguments next, then Tab
-        expands it), the SQL itself for a plain bookmark."""
+        """`i`: the call at the prompt: `@name ` for a template (arguments next, then Tab
+        expands it, or Ctrl-O runs it), `(name )` alone in a cell for a macro; the SQL itself
+        for a bookmark."""
         self._template_put(as_call=True)
 
     def _template_put(self, as_call: bool) -> None:
@@ -2210,7 +2746,14 @@ class App:
         cell = self._target_cell()
         buf = cell.buffer
         before = buf.document.text_before_cursor
-        if as_call and t.alias:
+        if as_call and t.kind == "macro" and t.alias:
+            if buf.text.strip():  # a macro stands alone in its cell: a new one below
+                self.new_cell_below(cell)
+                cell = self._focused_cell()
+                buf = cell.buffer
+            call = f"({t.alias} )"
+            buf.set_document(Document(call, len(call) - 1))  # the cursor where the arguments go
+        elif as_call and t.kind == "template" and t.alias:
             buf.insert_text(("" if not before or before[-1] in " \t\n(,=" else " ") + f"@{t.alias} ")
         elif not buf.text.strip():
             buf.set_document(Document(t.body, len(t.body)))
@@ -2263,10 +2806,13 @@ class App:
         else:
             ask["done"](answer)
 
-    def _open_editor(self, id: int | None, memo: str, alias: str | None, body: str) -> None:
-        """Edit a bookmark's query in the panel (a new bookmark when `id` is None), in INSERT mode."""
-        label = memo or (f"@{alias}" if alias else "bookmark")
-        self._tpl_edit = {"id": id, "memo": memo, "alias": alias, "label": label, "saved": body}
+    def _open_editor(self, id: int | None, memo: str, alias: str | None, body: str,
+                     kind: str = "bookmark") -> None:
+        """Edit an Archive entry's query in the panel (a new one when `id` is None), in INSERT mode."""
+        call = f"@{alias}" if kind == "template" and alias else f"({alias})" if kind == "macro" and alias else ""
+        label = memo or call or kind
+        self._tpl_edit = {"id": id, "memo": memo, "alias": alias, "kind": kind, "call": call,
+                          "label": label, "saved": body}
         self.editor_buffer.reset(Document(body, 0))
         self.app.layout.focus(self.editor_window)
         if self.vi:
@@ -2278,9 +2824,10 @@ class App:
         if e is None:
             return []
         changed = self.editor_buffer.text != e["saved"]
-        title = (f" {e['memo']}" if e["memo"] else "") + (f" @{e['alias']}" if e["alias"] else "") + \
+        kind = self.ARCHIVE_TITLES.get(e.get("kind", "bookmark"), "Bookmark")
+        title = f" {kind}" + (f" {e['memo']}" if e["memo"] else "") + (f" {e['call']}" if e.get("call") else "") + \
             (" (new)" if e["id"] is None else f" #{e['id']}") + (" [+]" if changed else "")
-        args = " · $1 $2 … arguments" if e["alias"] else ""
+        args = " · $1 text, :1 bound (the arguments)" if e.get("kind") in ("template", "macro") else ""
         return [("class:tab.active.focused", title + " "),
                 ("class:list.note", f" :w save · :wq save+close · :q close · :q! drop{args} ")]
 
@@ -2291,7 +2838,7 @@ class App:
             return False
         try:
             if e["id"] is None:
-                t = self.templates.add(body, e["memo"], e["alias"])
+                t = self.templates.add(body, e["memo"], e["alias"], kind=e.get("kind", "bookmark"))
                 e["id"] = t.id
                 self.say(f"{e['label']} added")
             else:
@@ -2306,9 +2853,9 @@ class App:
     def _editor_close(self) -> None:
         e = self._tpl_edit
         self._tpl_edit = None
-        ids = [t.id for t in self.templates.entries()]
-        if e and e["id"] in ids:
-            self.panel.tab.cursor = 1 + ids.index(e["id"])  # the edited line (row 0: the header)
+        t = next((t for t in self.templates.entries() if e and t.id == e["id"]), None)
+        if t is not None:
+            self._template_select(t)  # the edited line, on its page
         self.app.layout.focus(self.panel.window)
         if self.vi:
             self.app.vi_state.input_mode = InputMode.NAVIGATION
@@ -2341,12 +2888,20 @@ class App:
                      "emacs": "emacs keys: Ctrl-A / Ctrl-E, Ctrl-K …, always typing"}
     CLOSE_PAGE = {"delete": "a page closes at once, its cells with it (the default)",
                   "confirm": "asks first when the page holds cells"}
+    COMPLETION_CASE = {"upper": "Tab completes in upper case: sel -> SELECT (the default)",
+                       "typed": "Tab follows your typing: sel -> select, SEL -> SELECT"}
+    HISTORY_SIZES = (100, 500, 1000, 5000)  # the Settings tab's choices (config.toml takes any 10..100000)
 
     def _settings_rows(self) -> list[tuple[str, str]]:
-        """Each line's kind: "head" | "section" | "theme" | "mode" | "close" | "gap", and its value."""
+        """Each line's kind: "head" | "section" | "theme" | "mode" | "close" | "case" | "gap", and its value."""
         return ([("head", ""), ("section", "Theme")] + [("theme", name) for name in THEMES]
                 + [("gap", ""), ("section", "Editing mode")] + [("mode", m) for m in self.EDITING_MODES]
-                + [("gap", ""), ("section", "Closing a page")] + [("close", m) for m in self.CLOSE_PAGE])
+                + [("gap", ""), ("section", "Completion case")] + [("case", m) for m in self.COMPLETION_CASE]
+                + [("gap", ""), ("section", "Closing a page")] + [("close", m) for m in self.CLOSE_PAGE]
+                + [("gap", ""), ("section", "History size")] + [("history", str(n)) for n in self._history_sizes()])
+
+    def _history_sizes(self) -> list[int]:
+        return sorted(set(self.HISTORY_SIZES) | {self.history_max})  # a size set in config.toml too
 
     def _settings_items(self):
         out = []
@@ -2372,6 +2927,16 @@ class App:
                 frags = [mark(on), ("class:schema.title" if on else "", f"{value:<{width}}"),
                          ("class:list.note", self.CLOSE_PAGE[value])]
                 out.append((frags, "", "default" if value == "delete" else ""))
+            elif kind == "history":
+                on = int(value) == self.history_max
+                frags = [mark(on), ("class:schema.title" if on else "", f"{value:<{width}}"),
+                         ("class:list.note", f"the History tab keeps the latest {value} statements")]
+                out.append((frags, "", "default" if value == "500" else ""))
+            elif kind == "case":
+                on = (value == "upper") == self.words.upper
+                frags = [mark(on), ("class:schema.title" if on else "", f"{value:<{width}}"),
+                         ("class:list.note", self.COMPLETION_CASE[value])]
+                out.append((frags, "", "default" if value == "upper" else ""))
             else:
                 on = (value == "vi") == self.vi
                 frags = [mark(on), ("class:schema.title" if on else "", f"{value:<{width}}"),
@@ -2392,8 +2957,23 @@ class App:
             self.close_page_mode = value
             self.app.invalidate()
             self._save_ui("close_page", value, f"closing a page: {value}")
+        elif kind == "history":
+            self.set_history_max(int(value))
+        elif kind == "case":
+            self.words.upper = value == "upper"
+            self.app.invalidate()
+            self._save_ui("completion_case", value, f"completion case: {value}")
 
-    def _save_ui(self, key: str, value: str, shown: str) -> None:
+    def set_history_max(self, n: int) -> None:
+        """The History tab keeps the latest `n` statements (each once), from now on and on the
+        next start ([ui] history_max); the history file keeps every run."""
+        self.history_max = n
+        for s in self.sessions.values():
+            s.history = history_view(s.runs, n)
+        self.app.invalidate()
+        self._save_ui("history_max", n, f"history size: {n}")
+
+    def _save_ui(self, key: str, value, shown: str) -> None:
         """Keep a setting for the next start ([ui] in config.toml), and say it is on."""
         try:
             save_ui_setting(self.ai_settings.config_path or CONFIG_PATH, key, value)
@@ -2670,6 +3250,11 @@ class App:
         except (KeyError, TypeError, ValueError):
             s.watch = Watch()  # a damaged file: no snapshot
 
+    def _count_key(self, _sender=None) -> None:
+        """One more key (or mouse event) in: a view the shell's PageUp / wheel left goes back to
+        following the cursor from the next key on (ShellPane)."""
+        self._keys_in += 1
+
     def _show_cursor(self, _sender=None) -> None:
         """Any key brings back the cursor a run hid (Ctrl-O's own key comes before the run)."""
         for c in self._session.cells:
@@ -2921,6 +3506,34 @@ class App:
                 ("run a query: its plans and", "class:list.note", ""),
                 ("session statistics show here.", "class:list.note", "")]
 
+    def _cycle_macro(self, buf: Buffer) -> bool:
+        """Tab right after `(` at a cell's start (`(`, `(*`, `(*c`): the macros whose name starts
+        so, one by one, each Tab the next (round), followed by a space, with the `)` of the call
+        put after the cursor when there is none. False when it is no macro name's place, or none
+        matches."""
+        doc = buf.document
+        c = self._macro_cycle
+        if (c is not None and c["buffer"] is buf and doc.cursor_position == c["start"] + len(c["shown"])
+                and doc.text[c["start"]:doc.cursor_position] == c["shown"]):
+            c["i"] = (c["i"] + 1) % len(c["names"])  # Tab again: the next one
+        else:
+            m = MACRO_TYPED_RE.fullmatch(doc.text_before_cursor)
+            if not m or doc.text_after_cursor.strip() not in ("", ")"):
+                return False
+            names = self.templates.macro_names(m.group(1))
+            if not names:
+                return False
+            c = self._macro_cycle = {"buffer": buf, "start": m.start(1), "shown": m.group(1), "names": names, "i": 0}
+        name = c["names"][c["i"]] + " "
+        buf.delete_before_cursor(len(c["shown"]))
+        buf.insert_text(name)
+        c["shown"] = name
+        if ")" not in buf.document.text_after_cursor:
+            buf.insert_text(")", move_cursor=False)  # the call's end, after the arguments to come
+        body = " ".join(self.templates._macros.get(c["names"][c["i"]], "").split())
+        self.say(f"({c['names'][c['i']]}) {body}" + (f"   · Tab: the next of {len(c['names'])}" if len(c["names"]) > 1 else ""))
+        return True
+
     def _cycle_tab(self, buf: Buffer) -> bool:
         """Tab on a word: put the best candidate in its place; Tab again, the next one, and so on
         round (the word as typed comes back after the last). False when there is none."""
@@ -2940,7 +3553,7 @@ class App:
             table = False
             hint = hint_slot(doc.text_before_cursor[:len(doc.text_before_cursor) - len(prefix)])
             if hint is not None:  # in /*+ ... */: every hint, most used first
-                items = [match_case(prefix or hint, h) for h in self.words.hint_candidates(prefix)]
+                items = [self.words.cased(prefix or hint, h) for h in self.words.hint_candidates(prefix)]
                 if not items:
                     return False
             elif not prefix:
@@ -2993,7 +3606,7 @@ class App:
         if len(tables) < 2:
             return []
         out: list[str] = []
-        left = re.search(r"([A-Za-z_][\w$#]*)\.([A-Za-z_][\w$#]*)\s*=\s*$", text)
+        left = re.search(r"([^\W\d][\w$#]*)\.([^\W\d][\w$#]*)\s*=\s*$", text)
         if left:  # the other side of `a.x = `: x in the other tables first
             lq, lc = left.group(1).lower(), left.group(2).lower()
             others = [(q, cols) for q, cols in tables if q.lower() != lq]
@@ -3072,11 +3685,11 @@ class App:
         if not re.search(r"(?:^|,)\s*$", tail) or not text[-1:].isspace() and not text.endswith(","):
             return []
         head = text[:set_[-1].start()]
-        target = re.search(r"\bupdate\s+(?:only\s*\()?([A-Za-z_][\w$#.]*)\s*\)?(?:\s+[A-Za-z_][\w$#]*)?\s*$", head, re.I)
+        target = re.search(r"\bupdate\s+(?:only\s*\()?([^\W\d][\w$#.]*)\s*\)?(?:\s+[^\W\d][\w$#]*)?\s*$", head, re.I)
         if target is None:  # merge into t using … when matched then update set
             if not re.search(r"\bupdate\s*$", head, re.I):
                 return []
-            target = list(re.finditer(r"\bmerge\s+into\s+([A-Za-z_][\w$#.]*)", head, re.I))
+            target = list(re.finditer(r"\bmerge\s+into\s+([^\W\d][\w$#.]*)", head, re.I))
             target = target[-1] if target else None
         if target is None:
             return []
@@ -3091,12 +3704,12 @@ class App:
         the INTO table's. From the catalog Ctrl-O collected."""
         s, w = self._session, self.words
         text = blank_noise(before)
-        m = re.search(r"\binto\s+([A-Za-z_][\w$#.]*)(?:\s+[A-Za-z_][\w$#]*)?\s*\(([^()]*)$", text, re.I)
+        m = re.search(r"\binto\s+([^\W\d][\w$#.]*)(?:\s+[^\W\d][\w$#]*)?\s*\(([^()]*)$", text, re.I)
         if m:
             name, listed = m.group(1), m.group(2)
         else:  # merge into t using … when not matched then insert (
             m = re.search(r"\binsert\s*\(([^()]*)$", text, re.I)
-            into = list(re.finditer(r"\bmerge\s+into\s+([A-Za-z_][\w$#.]*)", text, re.I))
+            into = list(re.finditer(r"\bmerge\s+into\s+([^\W\d][\w$#.]*)", text, re.I))
             if not m or not into:
                 return []
             name, listed = into[-1].group(1), m.group(1)
@@ -3231,20 +3844,21 @@ class App:
                  if s.db.autocommit else "")
 
     def _results_title(self):
+        """The result pane's title, on its heavy rule: the row count alone, bold (`14 rows`,
+        `500 rows, more ↓`), and the selected row while the pane has the focus. The statement
+        and the connection are in the shell above and the top bar."""
         s = self._session
         focused = self.results.has_focus()
         shown = s.shown
-        style = "class:title.focused" if focused else "class:title"
-        out = [("class:border", "──"), (style, f" Result · {s.profile.name}")]
+        out = [("class:result.rule", "━━")]
+        count = ""
         if shown is not None and shown.result_title:
-            # the statement's keywords as in the input area; the row count after it stays plain
             m = RESULT_TITLE_RE.fullmatch(shown.result_title)
-            sql, footer = (m.group(1), m.group(2)) if m else (shown.result_title, "")
-            out += [(style, " · ")] + highlighted(sql, base=style) + [(style, footer)]
-        tail = ""
+            count = m.group(2).strip()[1:-1] if m else ""  # " (14 rows)" -> "14 rows"
+        out.append(("class:result.count.focused" if focused else "class:result.count",
+                    f" {count or 'Result'} "))
         if focused and self.results.grid and self.results.grid.rows:
-            tail = f" · row {self.results.row + 1}/{self.results.grid.rows}"
-        out.append((style, tail + " "))
+            out.append(("class:result.note", f"· row {self.results.row + 1}/{self.results.grid.rows} "))
         if shown is not None and shown.stale:
             out.append(("class:stale", "(stale) "))
         return out
@@ -3341,22 +3955,21 @@ class App:
             def _(event, i=i):
                 self.show_panel = True
                 self.panel.select(i)
-                editing = self._tpl_edit is not None and self.panel.tab.name == "bookmark"
+                editing = self._tpl_edit is not None and self.panel.tab.name == "archive"
                 event.app.layout.focus(self.editor_window if editing else self.panel.window)
                 if self.panel.tab.name == "ai" and self._ask is None and not self._session.chat.busy \
                         and not self._ai_picking():
                     self._ai_prompt()  # the AI tab: straight to the question line
 
-        # PageUp / PageDown always scroll the panel, wherever the focus is
+        # PageUp / PageDown scroll the pane that has the focus: the shell (its cells), the
+        # panel or the result pane
         @kb.add("pageup")
         def _(event):
-            if self.show_panel:
-                self.panel.page(-1)
+            self.page_focused(-1)
 
         @kb.add("pagedown")
         def _(event):
-            if self.show_panel:
-                self.panel.page(1)
+            self.page_focused(1)
 
         # Ctrl+PageUp / Ctrl+PageDown always scroll the result pane
         @kb.add("c-pageup")
@@ -3366,6 +3979,11 @@ class App:
         @kb.add("c-pagedown")
         def _(event):
             self.results.page(1)
+
+        @kb.add(MACRO_PAGE_KEY)
+        @kb.add("µ", filter=vi_navigation_mode)  # what Option+M types on a Mac whose Option is not Meta
+        def _(event):  # Alt+M: the macros
+            self.go_to_archive("macro")
 
         @kb.add("c-t")
         def _(event):  # a new page of the shell
@@ -3398,7 +4016,7 @@ class App:
         @kb.add(PANEL_KEY)
         def _(event):  # Alt+9: the side panel, on the tab it shows (the bookmark editor if open)
             self.show_panel = True
-            editing = self._tpl_edit is not None and self.panel.tab.name == "bookmark"
+            editing = self._tpl_edit is not None and self.panel.tab.name == "archive"
             event.app.layout.focus(self.editor_window if editing else self.panel.window)
 
         @kb.add(PROMPT_KEY)
@@ -3442,6 +4060,8 @@ class App:
             if hint_opening(doc.text_before_cursor, doc.text_after_cursor):
                 buf.insert_text(HINT_OPEN)  # `select /` + Tab → `select /*+ `
                 return
+            if self._cycle_macro(buf):  # `(` / `(*c` at the cell's start: the macros, one by one
+                return
             recall = HISTORY_REF_RE.search(doc.text_before_cursor)
             if recall:  # `!3` + Tab: run number 3 (1 is the oldest) in its place
                 runs = self._session.runs
@@ -3463,6 +4083,10 @@ class App:
                 self.say(act.message, error=True)
                 return
             if act.kind == "complete":
+                # nothing for Tab to complete (a line's start, after a blank …): a tab character
+                if next(iter(self.completer.get_completions(doc, CompleteEvent(completion_requested=True))), None) is None:
+                    buf.insert_text("\t")
+                    return
                 buf.start_completion(select_first=False)
                 return
             if act.delete:
@@ -3529,14 +4153,29 @@ class App:
 
         # Ctrl-O runs the focused cell: it reaches the app in every terminal and tmux,
         # and overrides vi's insert-mode Ctrl-O. Ctrl+Enter (when the terminal sends it
-        # distinctly), Alt+Enter, F5 and Ctrl-J (some terminals' Ctrl+Enter) do the same.
+        # distinctly), Alt+Enter, F5 and, in emacs mode, Ctrl-J (some terminals' Ctrl+Enter)
+        # do the same. In vim mode Ctrl-J / Ctrl-K go between the cells instead (below).
+        vim = Condition(lambda: self.vi)
+
         @kb.add("c-o", filter=in_shell)
         @kb.add(RUN_KEY, filter=in_shell)
         @kb.add(ALT_ENTER, filter=in_shell)
         @kb.add("f5", filter=in_shell)
-        @kb.add("c-j", filter=in_shell)
+        @kb.add("c-j", filter=in_shell & ~vim)
         def _(event):  # sync on purpose: the text must be taken before more keys arrive
             self.execute_cell(self._focused_cell())
+
+        # vim mode, NORMAL or INSERT: Ctrl-J / Ctrl-K, the next / previous cell at once, wherever
+        # the cursor is in this one (its bind lines are passed by: they are this cell's)
+        in_cell_or_binds = Condition(lambda: self._cell_in_focus() is not None)
+
+        @kb.add("c-j", filter=vim & in_cell_or_binds)
+        def _(event):
+            self._jump_cell(1)
+
+        @kb.add("c-k", filter=vim & in_cell_or_binds)
+        def _(event):
+            self._jump_cell(-1)
 
         self._vim_fixes(kb, in_shell)
 
@@ -3585,12 +4224,13 @@ class App:
                 cell.buffer.reset()
                 event.app.vi_state.input_mode = InputMode.INSERT
 
-        @kb.add("c-d", filter=inserting)
+        # Ctrl-D in the shell (a cell or its bind lines, any mode): that cell goes (it used to
+        # delete the character under the cursor, and quit on an empty input: Ctrl-Q quits)
+        in_cell_any = Condition(lambda: self._cell_in_focus() is not None)
+
+        @kb.add("c-d", filter=in_cell_any)
         def _(event):
-            if event.current_buffer.text:
-                event.current_buffer.delete()
-            else:
-                event.app.exit()
+            self.delete_cell(self._cell_in_focus())
 
         @kb.add("c-q")
         def _(event):
@@ -3607,6 +4247,17 @@ class App:
         # NORMAL `gg` / `G` go past the cell: the top cell's first line, the bottom cell's last.
         # With a count (`5G`, `3gg`) they go to that line of this cell, as in vim; `dG`, `ygg`
         # and VISUAL `G` keep their meaning (an operator pending is not NORMAL mode here).
+        # Alt+S, and the `ß` Option+S types on a Mac whose Option is not Meta
+        @kb.add("ß", filter=in_shell & vi_navigation_mode)
+        def _(event):  # one cell per statement
+            self.split_cell(self._focused_cell())
+
+        @kb.add(SPLIT_KEY)
+        def _(event):  # bound everywhere, so INSERT mode or another input does not type its ESC s
+            if self._focused_cell() is not None and event.app.vi_state.input_mode == InputMode.NAVIGATION \
+                    and self.vi:
+                self.split_cell(self._focused_cell())
+
         @kb.add("g", "t", filter=in_shell & vi_navigation_mode)
         def _(event):  # vim's tab keys: the next page (`3gt`: page 3), `gT` the previous
             if event.arg_present:
@@ -3648,6 +4299,10 @@ class App:
         def _(event):  # NORMAL Shift+O: run only the line under the cursor (vim's "open line above" gives way)
             self.run_line(self._focused_cell())
 
+        @kb.add("O", filter=in_shell & vi_selection_mode)
+        def _(event):  # VISUAL (Shift+V …) Shift+O: run what is selected, not the cursor's line
+            self.run_selection(self._focused_cell())
+
         @kb.add("P", filter=in_shell & vi_navigation_mode)
         def _(event):  # NORMAL Shift+P: a copy of the cell right below it
             self.duplicate_cell(self._focused_cell())
@@ -3659,6 +4314,11 @@ class App:
         @kb.add("f4", filter=in_shell)
         def _(event):  # the complete statement under the cursor, on a connection of its own
             self.run_parallel(self._focused_cell())
+
+        @kb.add(SCRIPT_KEY)
+        def _(event):  # Ctrl+Shift+O: every statement of the cell, one after another (elsewhere: nothing)
+            if self._focused_cell() is not None:
+                self.run_script(self._focused_cell())
 
         @kb.add("f1")
         def _(event):  # snapshot the session (cells, prompt and cursor, fetched rows) and quit
@@ -3725,7 +4385,25 @@ class App:
             return
         # it runs in place: Ctrl-N adds a cell for the next statement
         self.mark_run(cell, 0, len(text))
-        self.app.create_background_task(self.run_cell(s, cell, text))
+        self.app.create_background_task(self._run_and_advance(s, cell, text))
+
+    async def _run_and_advance(self, s: Session, cell: Cell, text: str) -> None:
+        """Ctrl-O: run the cell; once it ran without an error, the focus goes on to the next
+        cell, if there is one and the focus is still on this one. The result pane keeps this
+        run's result until the next cell runs or the focus moves again (`_pane_hold`)."""
+        version = cell.version
+        await self.run_cell(s, cell, text)
+        if cell.version == version or any(st == "class:error" for st, _ in cell.output):
+            return  # not run (its binds dropped), or an error: stay to fix it
+        if self._focused_cell() is not cell:
+            return  # moved on meanwhile
+        cells = [c for c in cell.page.cells if c.buffer is not None]
+        i = cells.index(cell) if cell in cells else -1
+        if 0 <= i < len(cells) - 1:
+            after = cells[i + 1]
+            self._pane_hold = (after, cell)
+            self._focus_cell(after, at_end=True)
+            self.app.invalidate()
 
     @staticmethod
     def mark_run(cell: Cell, start: int, end: int) -> None:
@@ -3767,7 +4445,7 @@ class App:
 
     def _remember(self, s: Session, text: str) -> None:
         s.runs.append((dt.datetime.now(), text))  # the next run number
-        s.history = history_view(s.runs, MAX_HISTORY_ITEMS)
+        s.history = history_view(s.runs, self.history_max)
         s.file_history.append_string(text)
         self.panel.tabs[PANEL_TABS.index("history")].cursor = 0
 
@@ -3791,7 +4469,7 @@ class App:
             return None, None
         known = {t: s.columns.get(t.lower()) for t in tables}
         boost = frozenset().union(*(c for c in known.values() if c))
-        m = re.search(r"([A-Za-z_][\w$#]*)\.[\w$#]*$", doc.text_before_cursor)
+        m = re.search(r"([^\W\d][\w$#]*)\.[\w$#]*$", doc.text_before_cursor)
         if m:
             by_alias = {}
             for _, t, alias in found.tables:
@@ -3919,6 +4597,118 @@ class App:
         self.mark_run(source, stmt.start, stmt.end)
         self.app.create_background_task(self._run_statement(s, source, stmt.text, buf.text))
 
+    def run_script(self, source: Cell) -> None:
+        """Ctrl+Shift+O: every statement of the cell, in order, in place, like F4 one after
+        another. The first error stops it there, the cursor at the statement that failed."""
+        s, buf = source.session, source.buffer
+        if buf.complete_state:
+            buf.cancel_completion()
+        if source.running:
+            self.say("the cell is still running", error=True)
+            return
+        stmts = [st for st in script_statements(buf.text) if prepare_statement(st.text, s.profile.type)]
+        if not stmts:
+            self.say("Ctrl+Shift+O: no statement in the cell", error=True)
+            return
+        self.app.create_background_task(self._run_script(s, source, stmts, buf.text))
+
+    @staticmethod
+    def _script_head(sql: str, width: int = 48) -> str:
+        """A statement on one line for the script's list: its comments left out, cut to `width`."""
+        lines = [l.strip() for l in sql.splitlines() if l.strip() and not l.strip().startswith("--")]
+        text = " ".join(" ".join(lines).split())
+        return text if len(text) <= width else text[:width - 1] + "…"
+
+    @staticmethod
+    def _script_outcome(cell: Cell) -> tuple[bool, str]:
+        """How the statement the cell just ran went: ok, and its outcome on one line."""
+        bad = any(st == "class:error" for st, _ in cell.output)
+        text = "".join(t for st, t in cell.output if st != "class:note.time")
+        lines = [l.strip() for l in text.splitlines() if l.strip() and not l.strip().startswith("-- ")]
+        return not bad, lines[0] if lines else ""
+
+    async def _run_script(self, s: Session, cell: Cell, stmts: list, whole: str) -> None:
+        rows: list[tuple[str, str, str]] = []  # (✓ ✗ ·, the statement on one line, its outcome)
+        failed = None  # (the statement that failed, its output)
+        for i, st in enumerate(stmts):
+            if cell.buffer.text != whole:  # edited meanwhile: the statements' places are gone
+                break
+            self.say(f"script: statement {i + 1}/{len(stmts)} running…")
+            version = cell.version
+            self.mark_run(cell, st.start, st.end)
+            await self.run_cell(s, cell, st.text)
+            if cell.version == version:  # it did not run (its bind values were not given)
+                break
+            ok, outcome = self._script_outcome(cell)
+            rows.append(("✓" if ok else "✗", self._script_head(st.text), outcome))
+            if not ok:
+                failed = (st, list(cell.output))
+                break
+        done = len(rows)
+        rows += [("·", self._script_head(st.text), "not run") for st in stmts[done:]]
+        ok_count = sum(1 for mark, _, _ in rows if mark == "✓")
+        head = f"script: {ok_count} of {len(stmts)} statement{'s' if len(stmts) != 1 else ''} ran"
+        if failed:
+            head += f", stopped at #{done}"
+        elif done < len(stmts):
+            head += ", stopped"
+        out = [("class:note", head + "\n")]
+        for n, (mark, sql, outcome) in enumerate(rows, 1):
+            style = "class:error" if mark == "✗" else "class:note.time" if mark == "·" else "class:note"
+            out.append((style, f"{mark} {n:>2}. {sql}  {outcome}\n"))
+        if failed:  # the error in full, as a run of that statement alone shows it
+            out += [("", "\n")] + [(st, t) for st, t in failed[1] if st == "class:error"]
+        if out and out[-1][1].endswith("\n"):
+            out[-1] = (out[-1][0], out[-1][1].rstrip("\n"))
+        cell.output = out
+        if cell.buffer.text == whole:
+            cell.ran_text = whole  # what ran came from this text: the cell is not stale
+        cell.version += 1
+        if failed:
+            # stop there: the cell focused, its cursor at the start of the statement that failed
+            if cell.page in s.pages:  # not closed meanwhile
+                if cell.page is not s.page:  # moved on to another page: back to this one
+                    self.show_page(s.pages.index(cell.page))
+                self.app.layout.focus(cell.window)
+                cell.buffer.cursor_position = failed[0].start
+                if self.vi:
+                    self.app.vi_state.input_mode = InputMode.NAVIGATION
+            self.say(f"script stopped at statement {done} of {len(stmts)}: {rows[done - 1][2]}", error=True)
+        else:
+            self.say(head)
+        self.app.invalidate()
+
+    def run_selection(self, source: Cell) -> None:
+        """VISUAL `O` (Shift+O after Shift+V, v or Ctrl-V): what the selection covers, in place:
+        one statement runs as F4 runs it; several run one after another, as Ctrl+Shift+O runs a
+        cell, stopping at the first error with the cursor on it. The selection then ends (NORMAL)."""
+        if source is None:
+            return
+        s, buf = source.session, source.buffer
+        if source.running:
+            self.say("the cell is still running", error=True)
+            return
+        ranges = list(buf.document.selection_ranges())
+        buf.exit_selection()
+        if self.vi:
+            self.app.vi_state.input_mode = InputMode.NAVIGATION
+        if not ranges:
+            return
+        start, end = ranges[0][0], ranges[-1][1]
+        text = buf.text[start:end] if len(ranges) == 1 else "\n".join(buf.text[a:b] for a, b in ranges)
+        stmts = [Statement(st.start + start, st.end + start, st.text) for st in script_statements(text)] \
+            if len(ranges) == 1 else script_statements(text)
+        stmts = [st for st in stmts if prepare_statement(st.text, s.profile.type)]
+        if not stmts:
+            self.say("O: nothing to run in the selection", error=True)
+            return
+        if len(stmts) == 1:
+            self.mark_run(source, stmts[0].start if len(ranges) == 1 else start,
+                          stmts[0].end if len(ranges) == 1 else end)
+            self.app.create_background_task(self._run_statement(s, source, stmts[0].text, buf.text))
+        else:
+            self.app.create_background_task(self._run_script(s, source, stmts, buf.text))
+
     def run_line(self, source: Cell) -> None:
         """NORMAL `O` (Shift+O): only the line under the cursor, in place, like F4 for a
         statement: `select …;` on a line of its own runs alone, without the lines around it."""
@@ -3973,58 +4763,210 @@ class App:
         except Exception:
             pass
 
-    async def _ask_binds(self, s: Session, names: list[str]) -> dict[str, str | None] | None:
-        """Each bind variable's value, asked one by one on the line under the panel with the
-        value last typed for it (this connection) filled in: Enter takes it, Esc drops the run.
-        Values bind as strings; `NULL` binds NULL. None when dropped."""
-        async with self._bind_lock:
-            values: dict[str, str | None] = {}
-            for i, name in enumerate(names):
-                answer: asyncio.Future = asyncio.get_running_loop().create_future()
-                self._ask_for(f":{name} =", s.binds.get(name.lower(), ""), lambda a: None,
-                              lambda a, f=answer: f.done() or f.set_result(a),
-                              lambda f=answer: f.done() or f.set_result(None), shell=True)
-                self.say(f"bind {i + 1}/{len(names)}: Enter takes the value (NULL for null), Esc drops the run")
-                self.app.invalidate()
-                text = await answer
-                if text is None:
-                    return None
-                s.binds[name.lower()] = text
-                values[name.lower()] = None if text.upper() == "NULL" else text
-            self.say("")
-            return values
+    # -- bind variables: one line each under the cell, `0 :cust_id = 20240101` -----------------
+    # A value, once given, is used by every later run (on this connection, by name, in any
+    # cell); it is changed on its line. A run asks only for a variable with no value yet.
+    def _cell_edited(self, cell: Cell) -> None:
+        self.drop_if_empty(cell)
+        self._sync_bind_names(cell)
+        # lines came in at once (`p`, a paste): the shell shows them, not only the cursor's line
+        lines = cell.buffer.document.line_count
+        added, cell._lines = lines - getattr(cell, "_lines", lines), lines
+        if added > 0 and cell.focused():
+            cell.page.container.reveal_below = max(cell.page.container.reveal_below, added)
+
+    def _sync_bind_names(self, cell: Cell, extra: list[str] = ()) -> None:
+        """The cell's bind lines follow its text: one per variable it has (and `extra`, those of
+        the SQL a template call made). A variable new to the cell starts with the value another
+        cell used for it last (on this connection), if one did."""
+        s = cell.session
+        names = list(bind_names(cell.buffer.text)) if s.profile.type in ("oracle", "sqlite") else []
+        seen = {n.lower() for n in names}
+        names += [n for n in extra if n.lower() not in seen]
+        for n in names:
+            if n.lower() not in cell.bind_values and n.lower() in s.binds:
+                cell.bind_values[n.lower()] = s.binds[n.lower()]
+        if tuple(names) != cell.bind_names:
+            cell.bind_names = tuple(names)
+            self._fill_binds(cell)
+
+    def _fill_binds(self, cell: Cell) -> None:
+        """The cell's bind lines as its values are (a variable with none: empty)."""
+        text = "\n".join(cell.bind_values.get(n.lower(), "") for n in cell.bind_names)
+        if cell.bind_buffer.text != text:
+            at = min(cell.bind_buffer.cursor_position, len(text))
+            cell._bind_filling = True
+            try:
+                cell.bind_buffer.set_document(Document(text, at), bypass_readonly=True)
+            finally:
+                cell._bind_filling = False
+
+    def _bind_edited(self, cell: Cell) -> None:
+        """A value changed on the cell's bind lines: the cell's own from now on (another cell
+        keeps its value; a cell that gets the variable later starts with this one); a line left
+        empty for a new variable stays unset."""
+        if getattr(cell, "_bind_filling", False):
+            return
+        for name, value in zip(cell.bind_names, cell.bind_buffer.text.split("\n")):
+            if value.strip() or name.lower() in cell.bind_values:
+                self._set_bind(cell, name, value.strip())
+
+    @staticmethod
+    def _set_bind(cell: Cell, name: str, value: str) -> None:
+        cell.bind_values[name.lower()] = value
+        cell.session.binds[name.lower()] = value  # the latest, for a cell that gets it later
+
+    def _bind_prefix(self, cell: Cell, n: int):
+        if n >= len(cell.bind_names):
+            return [("class:list.note", "    (no variable) ")]
+        name = cell.bind_names[n]
+        if self.binds_active(cell):  # a value is being typed: the name pink and bold
+            return [("", "  "), ("class:bind.name", f":{name}"), ("class:list.note", " = ")]
+        return [("class:bind.idle", f"  :{name} = ")]  # ran, or another cell has the focus: gray
+
+    def binds_active(self, cell: Cell) -> bool:
+        """A value is being typed on the cell's bind lines: the cursor is on them, or a run
+        waits there for one."""
+        return ((self._bind_wait is not None and self._bind_wait["cell"] is cell)
+                or (hasattr(self, "app") and self.app.layout.current_window is cell.bind_window))
+
+    def binds_shown(self, cell: Cell) -> bool:
+        """The cell's bind lines show once it ran with them, or while a run waits for a value."""
+        return bool(cell.bind_names) and (cell.binds_ran or (self._bind_wait is not None
+                                                             and self._bind_wait["cell"] is cell))
+
+    def _bind_keys(self) -> KeyBindings:
+        kb = KeyBindings()
+        cell = lambda: self.bind_of.get(get_app().layout.current_window)
+        row = lambda: get_app().current_buffer.document.cursor_position_row
+        first = Condition(lambda: row() == 0)
+        last = Condition(lambda: row() == get_app().current_buffer.document.line_count - 1)
+        kb.add("enter")(lambda e: self._bind_enter(cell()))  # any mode: run with these values
+        kb.add("c-o")(lambda e: self._bind_enter(cell()))
+        kb.add("c-c")(lambda e: self._bind_cancel(cell()))
+        kb.add("c-n")(lambda e: cell() and self.new_cell_below(cell()))  # as in the cell: a new one below
+        # off the first line: back to the cell's SQL; off the last: on to the next cell
+        kb.add("k", filter=first & vi_navigation_mode)(lambda e: self._focus_cell(cell(), at_end=True))
+        kb.add("up", filter=first)(lambda e: self._focus_cell(cell(), at_end=True))
+        kb.add("j", filter=last & vi_navigation_mode)(lambda e: self._step(cell(), 1, from_binds=True))
+        kb.add("down", filter=last)(lambda e: self._step(cell(), 1, from_binds=True))
+        return kb
+
+    def _bind_enter(self, cell: Cell | None) -> None:
+        if cell is None:
+            return
+        w = self._bind_wait
+        if w is not None and w["cell"] is cell:
+            # several values asked for: Enter goes on to the next one still empty, below; the run
+            # goes on from the last one
+            buf, lowered = cell.bind_buffer, [n.lower() for n in cell.bind_names]
+            lines, row = buf.text.split("\n"), buf.document.cursor_position_row
+            waiting = {n.lower() for n in w["missing"]}
+            later = [i for i in range(row + 1, len(lowered))
+                     if lowered[i] in waiting and not (lines[i].strip() if i < len(lines) else "")]
+            if later:
+                i = later[0]
+                buf.cursor_position = buf.document.translate_row_col_to_index(i, 0) + len(lines[i])
+                self.say(f"bind: a value for :{cell.bind_names[i]} · Enter goes on · Ctrl-C drops")
+                return
+            for name in cell.bind_names:
+                if name.lower() not in cell.bind_values:  # left empty: '' (NULL in Oracle)
+                    self._set_bind(cell, name, "")
+            w["future"].done() or w["future"].set_result(True)
+        elif not cell.running:  # a value changed: run the cell again with it
+            self.app.layout.focus(cell.window)
+            self.execute_cell(cell)
+
+    def _bind_cancel(self, cell: Cell | None) -> None:
+        w = self._bind_wait
+        if cell is not None and w is not None and w["cell"] is cell:
+            w["future"].done() or w["future"].set_result(False)
+
+    async def _ask_binds(self, s: Session, cell: Cell, names: list[str]) -> dict[str, str | None] | None:
+        """The values of the statement's bind variables: those the session has (given before,
+        changed on the cell's bind lines), and for a variable with none yet, typed on its line
+        under the cell while the run waits (Enter goes on, Ctrl-C drops the run: None).
+        Values bind as strings; `NULL` binds NULL."""
+        self._sync_bind_names(cell, extra=names)
+        if any(n.lower() not in cell.bind_values for n in names):
+            async with self._bind_lock:  # one run at a time waits for values (F4 runs several)
+                missing = [n for n in names if n.lower() not in cell.bind_values]
+                if missing:
+                    ok = await self._wait_for_binds(s, cell, missing)
+                    if not ok:
+                        return None
+        self.say("")
+        values = {n.lower(): cell.bind_values.get(n.lower(), "") for n in names}
+        return {k: (None if v.upper() == "NULL" else v) for k, v in values.items()}
+
+    async def _wait_for_binds(self, s: Session, cell: Cell, missing: list[str]) -> bool:
+        if cell.page in s.pages and cell.page is not s.page:
+            self.show_page(s.pages.index(cell.page))
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._bind_wait = {"cell": cell, "future": future, "missing": list(missing)}
+        lowered = [n.lower() for n in cell.bind_names]
+        row = lowered.index(missing[0].lower()) if missing[0].lower() in lowered else 0
+        doc = cell.bind_buffer.document
+        self.app.layout.focus(cell.bind_window)
+        cell.bind_buffer.cursor_position = doc.translate_row_col_to_index(row, 0) + len(doc.lines[row])
+        if self.vi:
+            self.app.vi_state.input_mode = InputMode.INSERT
+        more = f" (and {len(missing) - 1} more)" if len(missing) > 1 else ""
+        self.say(f"bind: a value for :{missing[0]}{more} on its line under the cell · Enter runs · Ctrl-C drops")
+        self.app.invalidate()
+        try:
+            return await future
+        finally:
+            self._bind_wait = None
+            if self.app.layout.current_window is cell.bind_window:
+                self.app.layout.focus(cell.window)
+                if self.vi:
+                    self.app.vi_state.input_mode = InputMode.NAVIGATION
+            self.app.invalidate()
 
     async def run_cell(self, s: Session, cell: Cell, text: str) -> None:
         """Run a cell's text and store the outcome on the cell (in place, also for re-runs)."""
+        if self._pane_hold is not None and self._pane_hold[0] is cell:
+            self._pane_hold = None  # the cell Ctrl-O went on to runs: its own result shows
         cell.running = True
         cell.affected = None
         self._drop_pager(cell)  # a re-run: the earlier result's cursor goes
         self.app.invalidate()
         pre: list[tuple[str, str]] = []
+        given: dict[str, str] = {}  # `:1`, `:2` … of a template or macro: its arguments
+        macro = False
         try:
-            if "\n" not in text.strip() and Templates.is_call(text):
+            try:
+                called = self.templates.expand_macro(text)
+            except TemplateError as e:
+                self._finish(s, cell, text, [("class:error", f"ERROR: {e}")])
+                return
+            if called is not None:  # `(name args)`: its query runs, the cell shows the call
+                (sql, given), macro = called, True
+            elif "\n" not in text.strip() and Templates.is_call(text):
                 call = text.strip()
                 if call == "@":
                     self._remember(s, text)
                     self._finish(s, cell, text, [("class:note", self.templates.listing())])
                     return
                 try:
-                    sql = self.templates.expand(call)
+                    sql, given = self.templates.expand_call(call)
                 except TemplateError as e:
                     self._finish(s, cell, text, [("class:error", f"ERROR: {e}")])
                     return
                 pre = [("class:note", "".join(f"-- {l}\n" for l in sql.splitlines()))]
             else:
                 sql = prepare_statement(text, s.profile.type)
-            binds = None
+            binds = dict(given) or None
             names = bind_names(sql) if sql and s.profile.type in ("oracle", "sqlite") else []
-            if names:
-                binds = await self._ask_binds(s, names)
-                if binds is None:
+            named = [n for n in names if n.lower() not in given]  # the others: the cell's bind lines
+            if named:
+                asked = await self._ask_binds(s, cell, named)
+                if asked is None:
                     self.say("not run: no values for its bind variables")
                     return
-                pre = pre + [("class:note", "".join(f"-- :{name} = {bind_shown(binds[name.lower()])}\n"
-                                                     for name in names))]
+                binds = {**given, **asked}
+                cell.binds_ran = True  # its bind lines show from now on, with the values bound
             n = cell.conn_index
             if n == 0 and not await self.ensure_connected(s):
                 self._remember(s, text)  # nothing says it is wrong: keep it
@@ -4087,7 +5029,7 @@ class App:
                 if res.more:
                     self._keep_pager(s, cell, res.more)
                 cell.ran_sql = sql
-                first = " ".join(sql.split()).rstrip(";")
+                first = " ".join((text if macro else sql).split()).rstrip(";")  # a macro: its call
                 title = f"{first[:60]}{'…' if len(first) > 60 else ''} {footer}"
                 self._finish(s, cell, text, pre + [("class:note", footer), ("class:note.time", f"  {stamp}")], build(res.columns, res.rows, res.kinds, res.types), title,
                              trace, (res.columns, res.rows, res.kinds, res.types))
@@ -4194,6 +5136,7 @@ class App:
                 self.app.create_background_task(self.refresh_suggestions())
                 self.app.create_background_task(self.spin_loop())
                 self.app.key_processor.before_key_press += self._show_cursor
+                self.app.key_processor.before_key_press += self._count_key
             self.app.run(pre_run=start)
         finally:
             sys.stdout.write(MODIFY_OTHER_KEYS_OFF)

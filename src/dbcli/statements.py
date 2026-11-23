@@ -47,8 +47,10 @@ def bind_names(sql: str) -> list[str]:
     return out
 
 
-PLSQL_START_RE = re.compile(r"\s*(?:declare|begin|create\s+(?:or\s+replace\s+)?(?:editionable\s+|noneditionable\s+)?"
-                            r"(?:procedure|function|package|trigger|type\s+body))\b", re.I)
+# comments may lead the block (`-- the job` above a `begin`)
+PLSQL_START_RE = re.compile(r"(?:\s+|--[^\n]*(?:\n|\Z)|/\*.*?\*/)*"
+                            r"(?:declare|begin|create\s+(?:or\s+replace\s+)?(?:editionable\s+|noneditionable\s+)?"
+                            r"(?:procedure|function|package|trigger|type\s+body))\b", re.I | re.S)
 OPEN_RE = re.compile(r"\bbegin\b|(?<!end )\bcase\b", re.I)
 CLOSE_RE = re.compile(r"\bend\b(?!\s+(?:if|loop)\b)", re.I)
 
@@ -91,6 +93,35 @@ def split(text: str) -> list[Statement]:
 def _ended(stmt: Statement) -> bool:
     body = TRAILING_NOISE_RE.sub("", stmt.text)
     return body.endswith(";") or body.endswith("\n/")
+
+
+SLASH_LINE_RE = re.compile(r"(?:[ \t]*/[ \t]*(?:\n|\Z)\s*)+")
+
+
+def script_statements(text: str) -> list[Statement]:
+    """Ctrl+Shift+O: every statement of the cell, in order; a piece that is only comments or
+    blanks (after the last `;`) is none. A comment above a statement goes with it. SQL*Plus'
+    lone `/` line after a PL/SQL block only ends the block: it is not part of what follows."""
+    out = []
+    for s in split(text):
+        m = SLASH_LINE_RE.match(s.text)
+        if m:
+            s = Statement(s.start + m.end(), s.end, s.text[m.end():])
+        if TRAILING_NOISE_RE.sub("", s.text).strip():
+            out.append(s)
+    return out
+
+
+def split_pieces(text: str) -> list[str]:
+    """Alt+S: the cell's text cut into one piece per statement, nothing lost but the blanks
+    between: a comment above a statement goes with it, a block's `/` and a trailing comment
+    with the statement before."""
+    stmts = script_statements(text)
+    if not stmts:
+        return [text.strip()] if text.strip() else []
+    starts = [s.start for s in stmts] + [len(text)]
+    starts[0] = 0
+    return [text[a:b].strip() for a, b in zip(starts, starts[1:]) if text[a:b].strip()]
 
 
 def statement_at(text: str, cursor: int) -> Statement | None:

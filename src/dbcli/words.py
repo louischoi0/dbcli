@@ -22,9 +22,9 @@ from typing import Iterator
 
 from .oracle_hints import HINTS
 
-# Oracle identifiers may contain $ and # (v$session, x#tab).
-WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_$#]*")
-PARTIAL_RE = re.compile(r"(?<![\w$#])[A-Za-z_][A-Za-z0-9_$#]*$")
+# Oracle identifiers may contain $ and # (v$session, x#tab), and letters of any script (주문, 고객번호).
+WORD_RE = re.compile(r"[^\W\d][\w$#]*")
+PARTIAL_RE = re.compile(r"(?<![\w$#])[^\W\d][\w$#]*$")
 WORD_CHAR_RE = re.compile(r"[\w$#]")
 # String literals, quoted identifiers and comments are not learned.
 NOISE_RE = re.compile(r"'(?:[^']|'')*'|\"[^\"]*\"|--[^\n]*|/\*.*?\*/", re.S)
@@ -93,6 +93,7 @@ class WordModel:
         self._base: dict[str, float] = {}
         self._uses: dict[str, float] = {}
         self._form: dict[str, str] = {}  # display form of identifiers
+        self.upper = False  # completions in upper case whatever the typing ([ui] completion_case = "upper")
         self._keys: list[str] = []  # sorted lowercase keys for prefix lookup
         self._path = path
         self._last: dict[str, float] = {}  # word -> when it was last used (epoch seconds)
@@ -221,16 +222,21 @@ class WordModel:
 
     def _display(self, prefix: str, key: str) -> str:
         form = key if key in KEYWORDS else self._form.get(key, key)  # extra words: as given
-        if form.islower() or form.isupper():  # case-insensitive name: follow typing
-            return prefix + match_case(prefix, form)[len(prefix):]
+        if form.islower() or form.isupper():  # case-insensitive name: upper case, or follow typing
+            return form.upper() if self.upper else prefix + match_case(prefix, form)[len(prefix):]
         return form  # mixed case ("MyTable") is spelled exactly as stored, prefix included
+
+    def cased(self, prefix: str, word: str) -> str:
+        """A keyword-like word (a hint) as completion puts it: upper case, or the typing's case."""
+        return word.upper() if self.upper else match_case(prefix, word)
 
     def suggest(self, before: str, after: str = "") -> tuple[str, str] | None:
         """(typed prefix, suggested word). The word may re-case the prefix: my -> MyTable."""
         if after and WORD_CHAR_RE.match(after):
             return None  # cursor is inside a word
         m = PARTIAL_RE.search(before)
-        if not m or len(m.group(0)) < MIN_PREFIX:
+        # a syllable of Hangul (any non-ASCII letter) says as much as two Latin letters: one will do
+        if not m or len(m.group(0)) < (1 if not m.group(0).isascii() else MIN_PREFIX):
             return None
         prefix = m.group(0)
         best = self.candidates(prefix, limit=1, before=before)

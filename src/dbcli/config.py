@@ -49,7 +49,7 @@ class Profile:
         return self.options.get("password")
 
 
-PANEL_TABS = ("history", "schema", "trace", "monitor", "bookmark", "ai", "settings")  # Alt-1..7, in this order
+PANEL_TABS = ("history", "schema", "trace", "monitor", "archive", "ai", "settings")  # Alt-1..7, in this order
 
 
 @dataclass
@@ -59,6 +59,8 @@ class UISettings:
     editing_mode: str = "vi"  # vi | emacs  (input area key bindings)
     theme: str = "sky"  # the color theme (themes.THEMES): sky | forest | ember | dusk
     close_page: str = "delete"  # closing a shell page: delete (at once) | confirm (ask when it holds cells)
+    completion_case: str = "upper"  # Tab's completions: upper (whatever the typing) | typed (follow it)
+    history_max: int = 500  # the History tab's statements at most (distinct, newest first)
 
 
 AI_EFFORTS = ("low", "medium", "high", "xhigh", "max")
@@ -129,17 +131,23 @@ def load(path: Path = CONFIG_PATH) -> Config:
         panel = "history"
     if panel == "navigator":  # now the schema browser
         panel = "schema"
-    if panel == "template":  # now the bookmarks (those with an @alias are the templates)
-        panel = "bookmark"
+    if panel in ("template", "bookmark"):  # now the Archive tab (bookmarks, templates, macros)
+        panel = "archive"
     ui = UISettings(panel=panel,
                     show_panel=bool(ui_data.get("show_panel", True)),
                     editing_mode=ui_data.get("editing_mode", "vi"),
                     theme=str(ui_data.get("theme", "sky")),
-                    close_page=str(ui_data.get("close_page", "delete")))
+                    close_page=str(ui_data.get("close_page", "delete")),
+                    completion_case=str(ui_data.get("completion_case", "upper")),
+                    history_max=ui_data.get("history_max", 500))
     if ui.editing_mode not in ("vi", "emacs"):
         raise ConfigError('[ui] editing_mode must be "vi" or "emacs"')
     if ui.close_page not in ("delete", "confirm"):
         raise ConfigError('[ui] close_page must be "delete" or "confirm"')
+    if ui.completion_case not in ("upper", "typed"):
+        raise ConfigError('[ui] completion_case must be "upper" or "typed"')
+    if isinstance(ui.history_max, bool) or not isinstance(ui.history_max, int) or not 10 <= ui.history_max <= 100000:
+        raise ConfigError("[ui] history_max must be a whole number from 10 to 100000")
     from .themes import THEMES
     if ui.theme not in THEMES:
         raise ConfigError(f"[ui] theme must be one of {', '.join(THEMES)}")

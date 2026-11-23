@@ -7,6 +7,8 @@ show_panel = true
 editing_mode = "vi"       # input area keys: vi (default) | emacs
 theme = "sky"             # colors: sky (default) | forest | ember | dusk (the Settings tab, Alt-7, sets it)
 close_page = "delete"     # closing a shell page: delete (default, at once) | confirm (ask first)
+completion_case = "upper" # Tab completes in: upper (default: sel -> SELECT) | typed (follows your typing)
+history_max = 500         # the History tab's statements at most: 10 .. 100000 (the Settings tab: 100 / 500 / 1000 / 5000)
 
 [templates]               # `@a 4` -> select * from t where num <= 4
 a = "select * from t where num <= $1"

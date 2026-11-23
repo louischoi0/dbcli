@@ -108,7 +108,9 @@ class HintHighlightTest(unittest.TestCase):
         doc = Document(text)
         line = doc.lines[row]
         ti = TransformationInput(None, doc, row, lambda i: i, [("", line)], len(line), 1)
-        frags = HintHighlight().apply_transformation(ti).fragments
+        from prompt_toolkit.layout.utils import explode_text_fragments
+        # one fragment per character: the styles are tested, not where the fragments are cut
+        frags = explode_text_fragments(HintHighlight().apply_transformation(ti).fragments)
         def show(st, t):
             if "class:hint.arg" in st:
                 return "#" if t == "@" else t.upper()  # args drawn as capitals, `@` as #
@@ -171,3 +173,37 @@ class HintOpeningTest(unittest.TestCase):
         for before in ("select v /", "select a/", "/", "select 'select /", "-- select /"):
             self.assertFalse(hint_opening(before, ""), before)
         self.assertFalse(hint_opening("select /", "*+ full(t) */"))  # already there
+
+
+class RanCursorTest(unittest.TestCase):
+    """prev_sql_id is checked against the SQL_ID the server hashes from the text."""
+
+    class Cur:
+        def __init__(self, server_id, child=2, fail=False):
+            self.server_id, self.child, self.fail, self.last = server_id, child, fail, ""
+
+        def setinputsizes(self, **_):
+            pass
+
+        def execute(self, sql, **_):
+            if self.fail and "dbms_sql_translator" in sql:
+                raise RuntimeError("PLS-00201")
+            self.last = sql
+
+        def fetchone(self):
+            return (self.server_id,) if "dbms_sql_translator" in self.last else (self.child,)
+
+    def test_prev_kept_when_it_is_the_statement(self):
+        from dbcli.db import OracleDB
+        self.assertEqual(OracleDB._ran_cursor(self.Cur("abc"), "select 1 from dual", ("abc", 1)), ("abc", 1))
+
+    def test_prev_of_another_statement_is_replaced(self):
+        from dbcli.db import OWN_STATS_ID, OracleDB
+        # a result cut at the row limit: Oracle 23ai named autotrace's own counter query
+        self.assertEqual(OracleDB._ran_cursor(self.Cur("abc"), "select 1 from dual", (OWN_STATS_ID, 0)), ("abc", 2))
+
+    def test_without_the_server_hash_own_query_is_dropped(self):
+        from dbcli.db import OWN_STATS_ID, OracleDB
+        cur = self.Cur("abc", fail=True)
+        self.assertIsNone(OracleDB._ran_cursor(cur, "select 1 from dual", (OWN_STATS_ID, 0)))
+        self.assertEqual(OracleDB._ran_cursor(cur, "select 1 from dual", ("xyz", 3)), ("xyz", 3))
