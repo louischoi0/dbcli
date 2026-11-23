@@ -1,8 +1,8 @@
 {
-  "model": "fable",
+  "model": "opus",
   "modelSettings": {
     "claude-opus-5-5": {
-      "effortLevel": "medium"
+      "effortLevel": "high"
     },
     "claude-fable-5-1": {
       "effortLevel": "high"
@@ -11,5 +11,6 @@
       "effortLevel": "high"
     }
   },
-  "theme": "dark-daltonized"
+  "theme": "dark-daltonized",
+  "switchModelsOnFlag": true
 }
